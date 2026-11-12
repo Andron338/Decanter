@@ -39,12 +39,37 @@ do {
             let url = URL(fileURLWithPath: path)
             if let found = ExecutableInspector.inspect(url) {
                 print("\(url.lastPathComponent): \(found.summary) → \(found.recommendedRenderer?.rawValue ?? "default")")
+                if let kind = InstallerDetector.kind(of: url) { print("  \(kind.displayName)") }
             } else {
                 print("\(url.lastPathComponent): not a Windows executable")
             }
         }
+    case "install":
+        // decanter-cli install <installer> [wine|crossover|gptk] [installer arguments]
+        let arguments = Array(CommandLine.arguments.dropFirst(2))
+        guard let path = arguments.first else { throw DecanterError("usage: decanter-cli install <installer> [engine]") }
+        guard let runtime = RuntimeManager.load() else { throw DecanterError("Run `decanter-cli setup` first.") }
+        let engine = arguments.dropFirst().first.flatMap(Engine.init(rawValue:)) ?? .wine
+        let bottleID = try await GameInstaller.prepareBottle(engine: engine)
+        print("Running the installer in bottle \(bottleID.uuidString)…")
+        try await GameInstaller.run(URL(fileURLWithPath: path), bottleID: bottleID, engine: engine, runtime: runtime,
+                                    arguments: arguments.dropFirst(2).joined(separator: " "))
+        let programs = GameInstaller.installedPrograms(bottleID: bottleID, engine: engine)
+        if programs.isEmpty { print("Nothing new was installed.") }
+        let choice = GameInstaller.obviousChoice(among: programs)
+        for program in programs {
+            print("\(program == choice ? "→" : " ") \(program.name)\(program.hasShortcut ? " (shortcut)" : ""): \(program.executable.path)")
+        }
+    case "scan":
+        // decanter-cli scan <bottle id> [engine]: what an installer left in a bottle.
+        let arguments = Array(CommandLine.arguments.dropFirst(2))
+        guard let id = arguments.first.flatMap(UUID.init(uuidString:)) else { throw DecanterError("usage: decanter-cli scan <bottle id> [engine]") }
+        let engine = arguments.dropFirst().first.flatMap(Engine.init(rawValue:)) ?? .wine
+        for program in GameInstaller.installedPrograms(bottleID: id, engine: engine) {
+            print("\(program.name)\(program.hasShortcut ? " (shortcut)" : ""): \(program.executable.path) \(program.arguments)")
+        }
     default:
-        print("usage: decanter-cli [setup|d3dmetal|crossover|status|inspect <exe>…]")
+        print("usage: decanter-cli [setup|d3dmetal|crossover|status|inspect <exe>…|install <installer> [engine]|scan <bottle id> [engine]]")
         exit(2)
     }
 } catch {

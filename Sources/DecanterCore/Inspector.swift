@@ -161,6 +161,11 @@ struct PEImage {
         sections = parsed
     }
 
+    /// File offset where the program itself ends. Installers append their payload after this.
+    var imageEnd: Int {
+        min(data.count, sections.map { $0.rawOffset + $0.rawSize }.max() ?? data.count)
+    }
+
     /// Lowercased names of DLLs in the import and delay-import tables.
     var importedLibraries: Set<String> {
         var names = Set<String>()

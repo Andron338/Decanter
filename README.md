@@ -14,8 +14,14 @@ no setup questions: click **Set Up** once, then drop a game's `.exe` (or its ins
 |---|---|
 | **Set Up** (once, ~235 MB) | Downloads the latest [Wine Staging build for macOS](https://github.com/Gcenx/macOS_Wine_builds) and [DXMT](https://github.com/3Shain/dxmt) (Direct3D 10/11 → Metal), verifies their SHA-256 digests, and pre-builds a template Windows environment. |
 | **Drop a game** | Clones the template into a private bottle for that game (instant on APFS, no extra disk), reads the `.exe` to see whether it is 32/64-bit and which DirectX it uses, and picks the renderer to match. |
-| **Drop an installer** (`setup*.exe`, `.msi`) | Runs it in a fresh bottle, then finds what it installed and adds it to the library. |
+| **Drop an installer** | Recognises Inno Setup (GOG), NSIS, InstallShield, WiX and `.msi` installers from the file itself, not its name. Runs it in a fresh bottle, reads the Start menu and desktop shortcuts it created to find the game (and its name and launch arguments), and adds it to the library. If it can't tell which program is the game, it asks. |
 | **Play** | Launches through Wine with the renderer chosen for that game. |
+
+**Installing, in more detail.** The **+** menu's *Install from Installer…* runs any `.exe` as an installer
+and lets you pick the engine it installs on (Wine 11, the CrossOver engine for older games, or Apple's Wine
+when D3DMetal is installed). While the installer runs you can cancel it, or tell Decanter it is done if it
+left a launcher or the game open. Installers get a private desktop, so no `.lnk` files land on your Mac's.
+Right-click a game → **Run Patch or Installer…** runs a patch, DLC or missing component in that game's bottle.
 
 Per-game fixes live behind right-click → **Settings…**: pick a renderer (DXMT, Apple's D3DMetal, the
 CrossOver engine, or Wine 11's built-in), run in a fixed-size window
@@ -71,7 +77,7 @@ open build/Decanter.app
 ```
 
 Requires Xcode 15+ (Swift 5.9+) and macOS 14+. `swift test` runs the core tests.
-`swift run decanter-cli setup|d3dmetal|crossover|status|inspect` drives the same setup code without the UI. `Package.swift` opens directly in Xcode.
+`swift run decanter-cli setup|d3dmetal|crossover|status|inspect|install|scan` drives the same setup and install code without the UI. `Package.swift` opens directly in Xcode.
 
 ## Layout
 

@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 struct LibraryView: View {
     @Environment(AppModel.self) private var model
     @State private var importing = false
+    /// The file chooser was opened from "Install from Installer…", so whatever is picked is run as one.
+    @State private var importingInstaller = false
     @State private var dropTargeted = false
 
     private let windowsTypes: [UTType] = [.exe, UTType(filenameExtension: "msi") ?? .data]
@@ -33,6 +35,19 @@ struct LibraryView: View {
                 VStack(spacing: 12) {
                     ProgressView()
                     Text(message).multilineTextAlignment(.center).frame(maxWidth: 320)
+                    if let active = model.activeInstall {
+                        HStack {
+                            if active.isNewGame {
+                                Button("Cancel Install", role: .destructive) { model.cancelInstall() }
+                                    .help("Stop the installer and throw away what it installed so far")
+                                Button("Installer Is Done") { model.finishInstall() }
+                                    .help("Use this if the installer has finished but left a launcher or the game running")
+                            } else {
+                                Button("Stop") { model.finishInstall() }
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
                 }
                 .padding(28)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
@@ -49,21 +64,36 @@ struct LibraryView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    importing = true
+                Menu {
+                    Button("Add Game…") { chooseFile(installer: false) }
+                        .keyboardShortcut("o")
+                    Button("Install from Installer…") { chooseFile(installer: true) }
+                        .keyboardShortcut("i")
                 } label: {
                     Label("Add Game", systemImage: "plus")
+                } primaryAction: {
+                    chooseFile(installer: false)
                 }
-                .help("Add a Windows game or installer")
-                .keyboardShortcut("o")
+                .help("Add a Windows game, or install one from its installer")
             }
         }
         .navigationSubtitle(model.runtime?.summary ?? "")
         .fileImporter(isPresented: $importing, allowedContentTypes: windowsTypes, allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result { model.add(urls) }
+            guard case .success(let urls) = result else { return }
+            if importingInstaller, let first = urls.first {
+                model.requestInstall(first)
+            } else {
+                model.add(urls)
+            }
         }
+        .sheet(item: $model.installRequest) { InstallSheet(request: $0) }
         .sheet(item: $model.editing) { GameSettingsSheet(game: $0) }
         .sheet(item: $model.installerResult) { InstallerResultSheet(result: $0) }
+    }
+
+    private func chooseFile(installer: Bool) {
+        importingInstaller = installer
+        importing = true
     }
 
     private var emptyState: some View {
@@ -74,9 +104,12 @@ struct LibraryView: View {
             Text("Drop a Windows game here").font(.title2.bold())
             Text("A game's .exe, or its installer. Decanter handles the rest.")
                 .foregroundStyle(.secondary)
-            Button("Choose File…") { importing = true }
-                .controlSize(.large)
-                .padding(.top, 6)
+            HStack {
+                Button("Choose File…") { chooseFile(installer: false) }
+                Button("Install from Installer…") { chooseFile(installer: true) }
+            }
+            .controlSize(.large)
+            .padding(.top, 6)
         }
     }
 }
@@ -126,6 +159,7 @@ struct GameCard: View {
             Button("Show Log") { model.showLog(game) }
             Button("Open C: Drive") { model.openDriveC(game) }
             Button("Wine Configuration") { model.runTool("winecfg", in: game) }
+            Button("Run Patch or Installer…") { model.runInstaller(in: game) }
             Divider()
             Button("Remove", role: .destructive) { model.remove(game) }
         }
@@ -291,34 +325,101 @@ struct D3DMetalInstallRow: View {
     }
 }
 
+/// Confirms an explicit "Install from Installer…" and lets the user pick the engine it runs on.
+struct InstallSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let request: InstallRequest
+    @State private var engine = Engine.wine
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Install a game").font(.title2.bold())
+            VStack(alignment: .leading, spacing: 2) {
+                Text(request.installer.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                Text(request.kind?.displayName ?? "Not a known installer type. Decanter will run it as one anyway.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Picker("Install for", selection: $engine) {
+                Text("Modern games (DirectX 10 and newer)").tag(Engine.wine)
+                Text("Older games (DirectX 9 and earlier, 32-bit)").tag(Engine.crossover)
+                if model.runtime?.hasD3DMetal == true {
+                    Text("DirectX 12 games (D3DMetal)").tag(Engine.gptk)
+                }
+            }
+            Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("The installer opens in its own window. Go through it as you would on Windows, and leave the install location as it is.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Install") {
+                    model.install(request.installer, engine: engine)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
+    }
+
+    private var note: String {
+        switch engine {
+        case .wine:
+            return "Runs on Wine 11. If the game turns out to be an older one, Decanter still switches its renderer for you."
+        case .crossover:
+            return model.runtime?.hasCrossOver == true
+                ? "Runs on CrossOver's Wine 9, which also suits installers that crash on Wine 11."
+                : "Runs on CrossOver's Wine 9, which also suits installers that crash on Wine 11. Decanter downloads it first (about 165 MB)."
+        case .gptk:
+            return "Runs on Apple's Wine, so the game is installed where D3DMetal can use it."
+        }
+    }
+}
+
 struct InstallerResultSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let result: InstallerResult
-    @State private var selection: Set<URL> = []
+    @State private var programs: [InstalledProgram] = []
+    @State private var selection: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Which one is the game?").font(.title2.bold())
-            Text("The installer added several programs. Pick the ones you want in your library.")
-                .foregroundStyle(.secondary)
-            List(result.executables, id: \.self, selection: $selection) { url in
-                VStack(alignment: .leading) {
-                    Text(url.lastPathComponent)
-                    Text(url.deletingLastPathComponent().lastPathComponent).font(.caption).foregroundStyle(.secondary)
+            Text(programs.isEmpty ? "Couldn't find the game" : "Which one is the game?").font(.title2.bold())
+            Text(programs.isEmpty
+                 ? "The installer finished, but Decanter found nothing new. If it installed somewhere unusual, choose the game's program yourself. If you cancelled it, discard this install."
+                 : "The installer added several programs. Pick the ones you want in your library.")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            List(programs, selection: $selection) { program in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(program.name)
+                        Text(program.executable.deletingLastPathComponent().lastPathComponent + "\\" + program.executable.lastPathComponent)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if program.hasShortcut {
+                        Image(systemName: "star.fill").foregroundStyle(.yellow)
+                            .help("The installer made a shortcut for this one")
+                    }
                 }
             }
             .frame(minHeight: 220)
             HStack {
+                Button("Choose Another…") {
+                    guard let program = model.browseInstalled(result) else { return }
+                    if !programs.contains(where: { $0.id == program.id }) { programs.append(program) }
+                    selection.insert(program.id)
+                }
                 Spacer()
-                Button("Cancel", role: .cancel) {
-                    model.cancelInstallerResult(result)
+                Button("Discard Install", role: .destructive) {
+                    model.discardInstallerResult(result)
                     dismiss()
                 }
                 Button("Add to Library") {
-                    for url in result.executables where selection.contains(url) {
-                        model.appendGame(executable: url, bottleID: result.bottleID)
-                    }
+                    model.addInstalled(programs.filter { selection.contains($0.id) }, from: result)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -326,7 +427,11 @@ struct InstallerResultSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 480)
+        .frame(width: 520)
         .interactiveDismissDisabled()
+        .onAppear {
+            programs = result.programs
+            selection = Set(result.programs.filter(\.hasShortcut).map(\.id))
+        }
     }
 }

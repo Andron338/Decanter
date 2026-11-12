@@ -1,6 +1,7 @@
 import AppKit
 import DecanterCore
 import Observation
+import UniformTypeIdentifiers
 
 enum SetupState: Equatable {
     case needed
@@ -8,10 +9,27 @@ enum SetupState: Equatable {
     case failed(String)
 }
 
+/// An installer the user picked explicitly, waiting for them to confirm how to run it.
+struct InstallRequest: Identifiable {
+    let id = UUID()
+    let installer: URL
+    let kind: InstallerKind?
+}
+
+/// What an installer left behind, when Decanter needs the user to say which program is the game.
 struct InstallerResult: Identifiable {
     let id = UUID()
     let bottleID: UUID
-    let executables: [URL]
+    let engine: Engine
+    var programs: [InstalledProgram]
+}
+
+/// An installer that is running right now.
+struct ActiveInstall: Equatable {
+    let bottleID: UUID
+    let engine: Engine
+    /// false when it runs inside an existing game's bottle (a patch, DLC or missing component).
+    let isNewGame: Bool
 }
 
 @MainActor
@@ -24,6 +42,9 @@ final class AppModel {
     var errorMessage: String?
     var running: Set<UUID> = []
     var installerResult: InstallerResult?
+    var installRequest: InstallRequest?
+    var activeInstall: ActiveInstall?
+    private var installCancelled = false
     var editing: Game?
     /// nil when idle; progress or failure of the optional D3DMetal download.
     var d3dMetalInstall: SetupState?
@@ -81,51 +102,173 @@ final class AppModel {
     }
 
     func add(_ url: URL) {
-        guard let runtime else { return }
-        guard ["exe", "msi"].contains(url.pathExtension.lowercased()) else {
-            errorMessage = "“\(url.lastPathComponent)” isn't a Windows program. Drop a .exe or .msi file."
-            return
+        guard runtime != nil, isWindowsProgram(url) else { return }
+        if GameNaming.looksLikeInstaller(url) {
+            install(url, engine: .wine)
+        } else {
+            addExecutable(url)
         }
+    }
+
+    private func isWindowsProgram(_ url: URL) -> Bool {
+        if ["exe", "msi"].contains(url.pathExtension.lowercased()) { return true }
+        errorMessage = "“\(url.lastPathComponent)” isn't a Windows program. Drop a .exe or .msi file."
+        return false
+    }
+
+    /// Adds a game that is already installed (or portable) somewhere on disk.
+    private func addExecutable(_ url: URL) {
         guard busyMessage == nil else { return }
         busyMessage = "Preparing a fresh Windows environment…"
         Task {
             defer { busyMessage = nil }
-            let bottleID = UUID()
             do {
+                let bottleID = UUID()
                 try await BottleStore.create(bottleID)
-                guard GameNaming.looksLikeInstaller(url) else {
-                    appendGame(executable: url, bottleID: bottleID)
-                    return
-                }
-                busyMessage = "Running the installer — finish it, and Decanter will pick up from there."
-                let installer = Game(name: "Installer", executablePath: url.path, bottleID: bottleID)
-                try await Launcher.runAndWait(
-                    Launcher.plan(game: installer, runtime: runtime), runtime: runtime, renderer: .metal)
-                let found = BottleStore.installedExecutables(bottleID)
-                if found.isEmpty {
-                    BottleStore.delete(bottleID)
-                    errorMessage = "The installer finished but nothing was installed. If it was cancelled, just drop it again."
-                } else if found.count == 1 {
-                    appendGame(executable: found[0], bottleID: bottleID)
-                } else {
-                    installerResult = InstallerResult(bottleID: bottleID, executables: found)
-                }
+                var game = Game(name: GameNaming.displayName(for: url), executablePath: url.path, bottleID: bottleID)
+                game.inspect(chooseRenderer: true)
+                games.append(game)
+                LibraryStore.save(games)
             } catch {
-                BottleStore.delete(bottleID)
                 errorMessage = error.localizedDescription
             }
         }
     }
 
-    func appendGame(executable: URL, bottleID: UUID) {
-        var game = Game(name: GameNaming.displayName(for: executable), executablePath: executable.path, bottleID: bottleID)
-        game.inspect(chooseRenderer: true)
-        games.append(game)
+    // MARK: Installing
+
+    /// Treats the file as an installer no matter what it's called, after asking which engine to use.
+    func requestInstall(_ url: URL) {
+        guard runtime != nil, isWindowsProgram(url) else { return }
+        installRequest = InstallRequest(installer: url, kind: InstallerDetector.kind(of: url))
+    }
+
+    /// Runs an installer in a new bottle for `engine`, then adds what it installed to the library.
+    func install(_ url: URL, engine: Engine) {
+        guard busyMessage == nil else { return }
+        busyMessage = "Preparing a fresh Windows environment…"
+        installCancelled = false
+        Task {
+            defer {
+                busyMessage = nil
+                activeInstall = nil
+            }
+            var created: UUID?
+            do {
+                let runtime = try await readyRuntime(for: GameInstaller.renderer(for: engine))
+                let bottleID = try await GameInstaller.prepareBottle(engine: engine)
+                created = bottleID
+                busyMessage = "Running the installer. Finish it, and Decanter will pick up from there."
+                activeInstall = ActiveInstall(bottleID: bottleID, engine: engine, isNewGame: true)
+                try await GameInstaller.run(url, bottleID: bottleID, engine: engine, runtime: runtime)
+                activeInstall = nil
+                if installCancelled {
+                    BottleStore.delete(bottleID)
+                    return
+                }
+                busyMessage = "Looking for the game…"
+                let programs = await Task.detached {
+                    GameInstaller.installedPrograms(bottleID: bottleID, engine: engine)
+                }.value
+                if let choice = GameInstaller.obviousChoice(among: programs) {
+                    try await addInstalled([choice], bottleID: bottleID, engine: engine)
+                } else {
+                    installerResult = InstallerResult(bottleID: bottleID, engine: engine, programs: programs)
+                }
+            } catch {
+                if let created { BottleStore.delete(created) }
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Abandons a running install and throws away its bottle.
+    func cancelInstall() {
+        installCancelled = true
+        finishInstall()
+    }
+
+    /// Ends whatever is still running in the installer's bottle, for installers that leave a launcher
+    /// or the game itself open, so Decanter can carry on.
+    func finishInstall() {
+        guard let runtime, let active = activeInstall else { return }
+        busyMessage = installCancelled ? "Cancelling…" : "Finishing up…"
+        Task { await GameInstaller.stop(bottleID: active.bottleID, engine: active.engine, runtime: runtime) }
+    }
+
+    /// Adds installed programs as games. They share the bottle the installer ran in.
+    func addInstalled(_ programs: [InstalledProgram], bottleID: UUID, engine: Engine) async throws {
+        // Every game needs a bottle for the standard engine; the install lives in the one it ran on.
+        var standardBottle = bottleID
+        if engine != .wine {
+            standardBottle = UUID()
+            try await BottleStore.create(standardBottle)
+        }
+        for program in programs {
+            var game = Game(name: program.name, executablePath: program.executable.path, bottleID: standardBottle)
+            game.settings.arguments = program.arguments
+            game.inspect(chooseRenderer: true)
+            if engine != .wine {
+                game.setBottle(bottleID, for: engine)
+                // Stay on the engine the install belongs to: its registry entries exist nowhere else.
+                game.settings.renderer = GameInstaller.renderer(for: engine)
+            }
+            games.append(game)
+        }
         LibraryStore.save(games)
     }
 
-    func cancelInstallerResult(_ result: InstallerResult) {
+    func addInstalled(_ programs: [InstalledProgram], from result: InstallerResult) {
+        Task {
+            do {
+                try await addInstalled(programs, bottleID: result.bottleID, engine: result.engine)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Lets the user point at the game inside the bottle when Decanter couldn't find it.
+    func browseInstalled(_ result: InstallerResult) -> InstalledProgram? {
+        let panel = NSOpenPanel()
+        panel.directoryURL = BottleStore.driveC(result.bottleID)
+        panel.allowedContentTypes = [.exe]
+        panel.message = "Choose the game's program"
+        panel.prompt = "Choose"
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return InstalledProgram(executable: url, name: GameNaming.displayName(for: url))
+    }
+
+    func discardInstallerResult(_ result: InstallerResult) {
         BottleStore.delete(result.bottleID)
+    }
+
+    /// Runs a patch, DLC or component installer inside a game's existing bottle.
+    func runInstaller(in game: Game) {
+        guard runtime != nil, busyMessage == nil else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.exe, UTType(filenameExtension: "msi") ?? .data]
+        panel.message = "Choose a patch, add-on or installer to run in \(game.name)'s Windows environment"
+        panel.prompt = "Run"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        busyMessage = "Preparing…"
+        Task {
+            defer {
+                busyMessage = nil
+                activeInstall = nil
+            }
+            do {
+                let game = try await prepared(game)
+                guard let runtime else { return }
+                let engine = runtime.engine(for: game.settings.renderer)
+                let bottleID = game.bottle(for: engine)
+                busyMessage = "Running \(url.lastPathComponent) for \(game.name)…"
+                activeInstall = ActiveInstall(bottleID: bottleID, engine: engine, isNewGame: false)
+                try await GameInstaller.run(url, bottleID: bottleID, engine: engine, runtime: runtime)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     // MARK: D3DMetal add-on
@@ -152,13 +295,14 @@ final class AppModel {
 
     // MARK: Playing
 
-    /// Gets everything a game's chosen engine needs in place before launch: downloads the CrossOver
-    /// engine the first time a game wants it, and creates the game's bottle for that engine.
-    private func prepared(_ game: Game) async throws -> Game {
-        guard var runtime else { return game }
-        if game.settings.renderer == .crossover && !runtime.hasCrossOver {
+    /// The runtime with the engine behind `renderer` installed, downloading the CrossOver engine the
+    /// first time something needs it.
+    private func readyRuntime(for renderer: Renderer) async throws -> InstalledRuntime {
+        guard var runtime else { throw DecanterError("Decanter isn't set up yet.") }
+        if renderer == .crossover && !runtime.hasCrossOver {
+            let previous = busyMessage
             busyMessage = "Getting the engine for older games (about 165 MB, one time)…"
-            defer { busyMessage = nil }
+            defer { busyMessage = previous }
             runtime = try await RuntimeManager.installCrossOver(into: runtime) { progress in
                 Task { @MainActor in
                     guard self.busyMessage != nil else { return }
@@ -168,6 +312,13 @@ final class AppModel {
             }
             self.runtime = runtime
         }
+        return runtime
+    }
+
+    /// Gets everything a game's chosen engine needs in place before launch: downloads the CrossOver
+    /// engine the first time a game wants it, and creates the game's bottle for that engine.
+    private func prepared(_ game: Game) async throws -> Game {
+        let runtime = try await readyRuntime(for: game.settings.renderer)
         let engine = runtime.engine(for: game.settings.renderer)
         guard game.existingBottle(for: engine) == nil,
               let index = games.firstIndex(where: { $0.id == game.id }) else { return game }

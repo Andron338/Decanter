@@ -136,9 +136,9 @@ public enum BottleStore {
     }
 
     /// Executables present in the bottle but not in the template, i.e. what an installer just put there.
-    public static func installedExecutables(_ id: UUID) -> [URL] {
-        let known = Set(executables(under: templatePrefix(.wine).appendingPathComponent("drive_c")).map(\.relative))
-        return executables(under: driveC(id))
+    static func newExecutables(prefix: URL, templatePrefix: URL) -> [URL] {
+        let known = Set(executables(under: templatePrefix.appendingPathComponent("drive_c")).map(\.relative))
+        return executables(under: prefix.appendingPathComponent("drive_c"))
             .filter { !known.contains($0.relative) && !GameNaming.isHelperExecutable($0.url) }
             .map(\.url)
             .sorted { $0.path.count < $1.path.count }
@@ -169,10 +169,13 @@ public enum GameNaming {
         "program files (x86)", "drive_c", "games", "",
     ]
 
+    /// True for files named like an installer and for ones built with a known installer maker,
+    /// whatever they are called (GOG's `game_name_1.0.exe`, for instance).
     public static func looksLikeInstaller(_ url: URL) -> Bool {
         if url.pathExtension.lowercased() == "msi" { return true }
         let stem = url.deletingPathExtension().lastPathComponent.lowercased()
-        return ["setup", "install"].contains { stem.contains($0) } && !stem.contains("uninstall")
+        if stem.contains("uninstall") || stem.hasPrefix("unins") { return false }
+        return ["setup", "install"].contains { stem.contains($0) } || InstallerDetector.kind(of: url) != nil
     }
 
     static func isHelperExecutable(_ url: URL) -> Bool {
