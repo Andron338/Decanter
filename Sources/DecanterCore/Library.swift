@@ -13,6 +13,12 @@ public struct GameSettings: Codable, Equatable {
     public var rayTracing = false
     public var metalFX = false
     public var advertiseAVX = false
+    /// Wine DLL overrides, in WINEDLLOVERRIDES form: `dinput8=n,b;d3d9=n`.
+    public var dllOverrides = ""
+    /// Extra environment variables, one `NAME=value` per line.
+    public var environment = ""
+    /// Folder the game starts in; empty means the folder its program is in.
+    public var workingDirectory = ""
 
     public init() {}
 
@@ -30,6 +36,9 @@ public struct GameSettings: Codable, Equatable {
         rayTracing = try c.decodeIfPresent(Bool.self, forKey: .rayTracing) ?? d.rayTracing
         metalFX = try c.decodeIfPresent(Bool.self, forKey: .metalFX) ?? d.metalFX
         advertiseAVX = try c.decodeIfPresent(Bool.self, forKey: .advertiseAVX) ?? d.advertiseAVX
+        dllOverrides = try c.decodeIfPresent(String.self, forKey: .dllOverrides) ?? d.dllOverrides
+        environment = try c.decodeIfPresent(String.self, forKey: .environment) ?? d.environment
+        workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory) ?? d.workingDirectory
     }
 }
 
@@ -48,12 +57,23 @@ public struct Game: Codable, Identifiable, Equatable {
     public var lastPlayed: Date?
     /// What the executable was detected to need; nil if never inspected or unreadable.
     public var requirements: GameRequirements?
+    // Optional so libraries saved by older versions keep loading.
+    public var favorite: Bool?
+    /// Total time the game has been running, in seconds.
+    public var playSeconds: Double?
+    public var added: Date?
+    /// An automatic cover lookup has been tried, so it isn't repeated on every launch.
+    public var coverLookedUp: Bool?
 
     public init(name: String, executablePath: String, bottleID: UUID) {
         self.name = name
         self.executablePath = executablePath
         self.bottleID = bottleID
+        self.added = Date()
     }
+
+    public var isFavorite: Bool { favorite ?? false }
+    public var playTime: TimeInterval { playSeconds ?? 0 }
 
     /// Reads the executable and, when `chooseRenderer` is set, switches to the renderer that suits it.
     public mutating func inspect(chooseRenderer: Bool) {

@@ -48,6 +48,23 @@ final class AppModel {
     var editing: Game?
     /// nil when idle; progress or failure of the optional D3DMetal download.
     var d3dMetalInstall: SetupState?
+    /// A game waiting for the user to confirm its removal.
+    var pendingRemoval: Game?
+    /// A game whose cover the user is picking from online results.
+    var coverSearch: Game?
+    /// Cover images by game. Games without one fall back to `icons`, then to a generated placeholder.
+    private(set) var covers: [UUID: NSImage] = [:]
+    /// The icon embedded in each game's program.
+    private(set) var icons: [UUID: NSImage] = [:]
+
+    static var downloadsCoversAutomatically: Bool {
+        UserDefaults.standard.object(forKey: "autoCovers") as? Bool ?? true
+    }
+
+    init() {
+        for game in games { loadArtwork(for: game) }
+        fetchMissingCovers()
+    }
 
     /// Games added before detection existed get inspected once; their renderer choice is left alone
     /// unless it was still the untouched default.
@@ -129,6 +146,8 @@ final class AppModel {
                 game.inspect(chooseRenderer: true)
                 games.append(game)
                 LibraryStore.save(games)
+                loadArtwork(for: game)
+                fetchMissingCovers()
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -214,8 +233,10 @@ final class AppModel {
                 game.settings.renderer = GameInstaller.renderer(for: engine)
             }
             games.append(game)
+            loadArtwork(for: game)
         }
         LibraryStore.save(games)
+        fetchMissingCovers()
     }
 
     func addInstalled(_ programs: [InstalledProgram], from result: InstallerResult) {
@@ -350,6 +371,7 @@ final class AppModel {
                 _ = try Launcher.start(Launcher.plan(game: game, runtime: runtime), log: logURL(for: game)) { status in
                     Task { @MainActor in
                         self.running.remove(id)
+                        self.addPlayTime(Date().timeIntervalSince(started), to: id)
                         if status != 0 && Date().timeIntervalSince(started) < 10 {
                             self.errorMessage = "\(game.name) quit right after starting. "
                                 + "Open its settings to try a different renderer or a fixed-size window, or check the log."
@@ -375,7 +397,103 @@ final class AppModel {
 
     func update(_ game: Game) {
         guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        var game = game
+        let programChanged = games[index].executablePath != game.executablePath
+        if programChanged { game.inspect(chooseRenderer: false) }
+        // Play time and the cover lookup can change while the settings sheet holds an older copy.
+        game.playSeconds = games[index].playSeconds
+        game.lastPlayed = games[index].lastPlayed
+        game.coverLookedUp = games[index].coverLookedUp
         games[index] = game
+        LibraryStore.save(games)
+        if programChanged { loadArtwork(for: game) }
+    }
+
+    func toggleFavorite(_ game: Game) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        games[index].favorite = games[index].isFavorite ? nil : true
+        LibraryStore.save(games)
+    }
+
+    private func addPlayTime(_ seconds: TimeInterval, to id: UUID) {
+        guard seconds > 0, let index = games.firstIndex(where: { $0.id == id }) else { return }
+        games[index].playSeconds = games[index].playTime + seconds
+        LibraryStore.save(games)
+    }
+
+    func showInFinder(_ game: Game) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: game.executablePath)])
+    }
+
+    // MARK: Artwork
+
+    private func loadArtwork(for game: Game) {
+        covers[game.id] = CoverStore.data(for: game.id).flatMap(NSImage.init(data:))
+        icons[game.id] = ExecutableInspector.icon(of: URL(fileURLWithPath: game.executablePath))
+            .flatMap(NSImage.init(data:))
+    }
+
+    /// Saves image data as the game's cover. Returns false if it isn't an image.
+    @discardableResult
+    func setCover(_ data: Data, for game: Game) -> Bool {
+        guard let image = NSImage(data: data), image.isValid, image.size.width > 0 else { return false }
+        do {
+            try CoverStore.save(data, for: game.id)
+            covers[game.id] = image
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func setCover(from file: URL, for game: Game) {
+        guard let data = try? Data(contentsOf: file), setCover(data, for: game) else {
+            errorMessage = "“\(file.lastPathComponent)” isn't an image Decanter can use as a cover."
+            return
+        }
+    }
+
+    func chooseCover(for game: Game) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.message = "Choose a cover image for \(game.name)"
+        panel.prompt = "Use as Cover"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        setCover(from: url, for: game)
+    }
+
+    func removeCover(for game: Game) {
+        CoverStore.remove(game.id)
+        covers[game.id] = nil
+    }
+
+    /// Looks up covers for games that have none and haven't been looked up before. Each game is tried
+    /// once; after that a cover only changes when the user picks one.
+    func fetchMissingCovers() {
+        guard Self.downloadsCoversAutomatically else { return }
+        for game in games where covers[game.id] == nil && game.coverLookedUp != true {
+            let id = game.id
+            let name = game.name
+            // Marked up front so a second call while this one is in flight doesn't repeat it.
+            setCoverLookedUp(true, for: id)
+            Task {
+                do {
+                    if let data = try await CoverFinder.cover(forGameNamed: name), covers[id] == nil,
+                       let game = games.first(where: { $0.id == id }) {
+                        setCover(data, for: game)
+                    }
+                } catch {
+                    // Offline or the store was unreachable: try again next launch.
+                    setCoverLookedUp(nil, for: id)
+                }
+            }
+        }
+    }
+
+    private func setCoverLookedUp(_ value: Bool?, for id: UUID) {
+        guard let index = games.firstIndex(where: { $0.id == id }) else { return }
+        games[index].coverLookedUp = value
         LibraryStore.save(games)
     }
 
@@ -383,6 +501,9 @@ final class AppModel {
         stop(game)
         games.removeAll { $0.id == game.id }
         LibraryStore.save(games)
+        CoverStore.remove(game.id)
+        covers[game.id] = nil
+        icons[game.id] = nil
         for bottle in game.bottles where !games.contains(where: { $0.bottles.contains(bottle) }) {
             BottleStore.delete(bottle)
         }

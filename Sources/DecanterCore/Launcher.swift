@@ -25,7 +25,26 @@ public enum Launcher {
             if settings.metalFX { env["D3DM_ENABLE_METALFX"] = "1" }
             if settings.advertiseAVX { env["ROSETTA_ADVERTISE_AVX"] = "1" }
         }
+        let overrides = settings.dllOverrides.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !overrides.isEmpty { env["WINEDLLOVERRIDES"] = overrides }
+        // The user's own variables go last so they can override anything above except the prefix.
+        for (name, value) in parseEnvironment(settings.environment) where name != "WINEPREFIX" {
+            env[name] = value
+        }
         return env
+    }
+
+    /// Reads `NAME=value` lines. Blank lines, `#` comments and lines without a valid name are skipped.
+    public static func parseEnvironment(_ text: String) -> [(name: String, value: String)] {
+        text.split(whereSeparator: \.isNewline).compactMap { line in
+            let line = line.trimmingCharacters(in: .whitespaces)
+            guard !line.hasPrefix("#"), let equals = line.firstIndex(of: "=") else { return nil }
+            let name = line[..<equals].trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, name.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }) else {
+                return nil
+            }
+            return (name, String(line[line.index(after: equals)...]).trimmingCharacters(in: .whitespaces))
+        }
     }
 
     public static func plan(game: Game, runtime: InstalledRuntime) -> LaunchPlan {
@@ -43,7 +62,17 @@ public enum Launcher {
             executable: runtime.wine(for: game.settings.renderer),
             arguments: arguments,
             environment: gameEnvironment(game, runtime: runtime),
-            workingDirectory: exe.deletingLastPathComponent())
+            workingDirectory: workingDirectory(for: game))
+    }
+
+    static func workingDirectory(for game: Game) -> URL {
+        let custom = game.settings.workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        var isDirectory: ObjCBool = false
+        if !custom.isEmpty, FileManager.default.fileExists(atPath: custom, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            return URL(fileURLWithPath: custom, isDirectory: true)
+        }
+        return URL(fileURLWithPath: game.executablePath).deletingLastPathComponent()
     }
 
     static func gameEnvironment(_ game: Game, runtime: InstalledRuntime, quiet: Bool = false) -> [String: String] {

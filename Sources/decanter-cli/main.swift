@@ -44,6 +44,15 @@ do {
                 print("\(url.lastPathComponent): not a Windows executable")
             }
         }
+    case "icon":
+        // decanter-cli icon <exe> <out.ico>: the icon Decanter shows for a game without a cover.
+        let arguments = Array(CommandLine.arguments.dropFirst(2))
+        guard arguments.count == 2 else { throw DecanterError("usage: decanter-cli icon <exe> <out.ico>") }
+        guard let icon = ExecutableInspector.icon(of: URL(fileURLWithPath: arguments[0])) else {
+            throw DecanterError("\(arguments[0]) has no icon.")
+        }
+        try icon.write(to: URL(fileURLWithPath: arguments[1]))
+        print("Wrote \(icon.count) bytes")
     case "install":
         // decanter-cli install <installer> [wine|crossover|gptk] [installer arguments]
         let arguments = Array(CommandLine.arguments.dropFirst(2))
@@ -69,7 +78,7 @@ do {
             print("\(program.name)\(program.hasShortcut ? " (shortcut)" : ""): \(program.executable.path) \(program.arguments)")
         }
     default:
-        print("usage: decanter-cli [setup|d3dmetal|crossover|status|inspect <exe>…|install <installer> [engine]|scan <bottle id> [engine]]")
+        print("usage: decanter-cli [setup|d3dmetal|crossover|status|inspect <exe>…|icon <exe> <out.ico>|install <installer> [engine]|scan <bottle id> [engine]]")
         exit(2)
     }
 } catch {

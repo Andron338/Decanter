@@ -325,4 +325,121 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(plan.environment["WINEDLLOVERRIDES"], "winemenubuilder.exe=d")
         XCTAssertEqual(plan.workingDirectory.path, "/d")
     }
+
+    func testEnvironmentOverridesAndWorkingFolder() throws {
+        var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
+        game.settings.dllOverrides = " dinput8=n,b "
+        game.settings.environment = "# a comment\nDXVK_HUD = fps\n\nnot a variable\n9 LIVES=1\nWINEPREFIX=/elsewhere\nEMPTY=\nPATHS=a=b"
+        let environment = Launcher.plan(game: game, runtime: runtime).environment
+        XCTAssertEqual(environment["WINEDLLOVERRIDES"], "dinput8=n,b")
+        XCTAssertEqual(environment["DXVK_HUD"], "fps")
+        XCTAssertEqual(environment["EMPTY"], "")
+        XCTAssertEqual(environment["PATHS"], "a=b")
+        XCTAssertNil(environment["9 LIVES"])
+        XCTAssertEqual(environment["WINEPREFIX"], BottleStore.prefix(game.bottleID).path)
+        XCTAssertEqual(Launcher.parseEnvironment(game.settings.environment).map(\.name),
+                       ["DXVK_HUD", "WINEPREFIX", "EMPTY", "PATHS"])
+
+        let folder = try temporaryFolder()
+        game.settings.workingDirectory = folder.path
+        XCTAssertEqual(Launcher.plan(game: game, runtime: runtime).workingDirectory.path, folder.path)
+        // A folder that has gone missing falls back to the program's own.
+        game.settings.workingDirectory = folder.appendingPathComponent("gone").path
+        XCTAssertEqual(Launcher.plan(game: game, runtime: runtime).workingDirectory.path, "/Games/X")
+    }
+
+    func testOldLibraryEntriesStillDecode() throws {
+        let json = #"[{"id":"7E5A8E0C-3F0B-4F0E-9B67-0D0A1C2B3D4E","name":"Old","executablePath":"/g/old.exe","#
+            + #""bottleID":"1E5A8E0C-3F0B-4F0E-9B67-0D0A1C2B3D4E","settings":{"renderer":"wine"}}]"#
+        let game = try XCTUnwrap(JSONDecoder().decode([Game].self, from: Data(json.utf8)).first)
+        XCTAssertFalse(game.isFavorite)
+        XCTAssertEqual(game.playTime, 0)
+        XCTAssertEqual(game.settings.dllOverrides, "")
+        XCTAssertEqual(game.settings.environment, "")
+    }
+
+    func testCoverMatchingOnlyAcceptsTheSameGame() throws {
+        let json = #"{"total":4,"items":[{"type":"app","name":"Portal 2","id":620,"tiny_image":"https://example.com/a.jpg"},"#
+            + #"{"type":"app","name":"Portal™","id":400},{"type":"bundle","name":"Portal","id":7},"#
+            + #"{"type":"app","name":"Grand Theft Auto: San Andreas – The Definitive Edition","id":1547000}]}"#
+        let candidates = try CoverFinder.parse(Data(json.utf8))
+        XCTAssertEqual(candidates.map(\.id), [620, 400, 1547000])
+        XCTAssertEqual(CoverFinder.bestMatch(for: "portal", among: candidates)?.id, 400)
+        XCTAssertEqual(CoverFinder.bestMatch(for: "Portal 2", among: candidates)?.id, 620)
+        XCTAssertEqual(CoverFinder.bestMatch(for: "Grand Theft Auto San Andreas", among: candidates)?.id, 1547000)
+        XCTAssertNil(CoverFinder.bestMatch(for: "Portal 3", among: candidates))
+        XCTAssertNil(CoverFinder.bestMatch(for: "Grand Theft Auto", among: candidates))
+        XCTAssertNil(CoverFinder.bestMatch(for: "™", among: candidates))
+        XCTAssertEqual(candidates[0].imageURLs.last?.absoluteString, "https://example.com/a.jpg")
+        XCTAssertEqual(candidates[0].imageURLs.count, 4)
+    }
+
+    /// A PE whose only section is a resource tree holding one icon group with a 16px and a 32px image.
+    private func makePEWithIcon() -> Data {
+        var data = Data(count: 0x200)
+        func put(_ value: Int, at offset: Int, width: Int) {
+            for index in 0..<width { data[offset + index] = UInt8((value >> (8 * index)) & 0xFF) }
+        }
+        let pe = 0x80, optional = pe + 24, sectionTable = optional + 224
+        put(0x5A4D, at: 0, width: 2)
+        put(pe, at: 0x3C, width: 4)
+        put(0x4550, at: pe, width: 4)
+        put(1, at: pe + 6, width: 2)
+        put(224, at: pe + 20, width: 2)
+        put(0x10B, at: optional, width: 2)
+        put(16, at: optional + 92, width: 4)
+        put(0x1000, at: optional + 96 + 2 * 8, width: 4)  // resource directory RVA
+        put(0x1000, at: sectionTable + 8, width: 4)  // virtual size
+        put(0x1000, at: sectionTable + 12, width: 4)  // virtual address
+        put(0x1000, at: sectionTable + 16, width: 4)  // raw size
+        put(0x200, at: sectionTable + 20, width: 4)  // raw offset
+        data.append(Data(count: 0x1000))
+        let root = 0x200
+        /// A directory at `offset` (relative to the root) with the given (id, target) entries.
+        func directory(_ offset: Int, _ entries: [(Int, Int)]) {
+            put(entries.count, at: root + offset + 14, width: 2)
+            for (index, entry) in entries.enumerated() {
+                put(entry.0, at: root + offset + 16 + index * 8, width: 4)
+                put(entry.1, at: root + offset + 20 + index * 8, width: 4)
+            }
+        }
+        func leaf(_ offset: Int, dataAt: Int, size: Int) {
+            put(0x1000 + dataAt, at: root + offset, width: 4)
+            put(size, at: root + offset + 4, width: 4)
+        }
+        let sub = 0x8000_0000
+        directory(0x000, [(3, sub | 0x040), (14, sub | 0x0C0)])
+        directory(0x040, [(1, sub | 0x060), (2, sub | 0x080)])  // RT_ICON: ids 1 and 2
+        directory(0x060, [(1033, 0x200)])
+        directory(0x080, [(1033, 0x210)])
+        directory(0x0C0, [(1, sub | 0x0E0)])  // RT_GROUP_ICON
+        directory(0x0E0, [(1033, 0x220)])
+        leaf(0x200, dataAt: 0x300, size: 4)
+        leaf(0x210, dataAt: 0x310, size: 6)
+        leaf(0x220, dataAt: 0x400, size: 6 + 28)
+        for (index, byte) in Array("tiny".utf8).enumerated() { data[root + 0x300 + index] = byte }
+        for (index, byte) in Array("bigger".utf8).enumerated() { data[root + 0x310 + index] = byte }
+        let group = root + 0x400
+        put(1, at: group + 2, width: 2)
+        put(2, at: group + 4, width: 2)
+        for (index, icon) in [(size: 16, bytes: 4, id: 1), (size: 32, bytes: 6, id: 2)].enumerated() {
+            let entry = group + 6 + index * 14
+            put(icon.size, at: entry, width: 1)
+            put(icon.size, at: entry + 1, width: 1)
+            put(1, at: entry + 4, width: 2)
+            put(32, at: entry + 6, width: 2)
+            put(icon.bytes, at: entry + 8, width: 4)
+            put(icon.id, at: entry + 12, width: 2)
+        }
+        return data
+    }
+
+    func testIconExtractionPicksTheLargestImage() throws {
+        let icon = try XCTUnwrap(PEImage(data: makePEWithIcon())?.iconFile)
+        XCTAssertEqual(Array(icon.prefix(6)), [0, 0, 1, 0, 1, 0])
+        XCTAssertEqual(Array(icon[6..<8]), [32, 32])
+        XCTAssertEqual(Array(icon[14..<22]), [6, 0, 0, 0, 22, 0, 0, 0])
+        XCTAssertEqual(String(decoding: icon.dropFirst(22), as: UTF8.self), "bigger")
+        XCTAssertNil(PEImage(data: makePE(is64Bit: true, imports: ["d3d11.dll"]))?.iconFile)
+    }
 }

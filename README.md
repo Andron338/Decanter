@@ -23,9 +23,21 @@ when D3DMetal is installed). While the installer runs you can cancel it, or tell
 left a launcher or the game open. Installers get a private desktop, so no `.lnk` files land on your Mac's.
 Right-click a game → **Run Patch or Installer…** runs a patch, DLC or missing component in that game's bottle.
 
-Per-game fixes live behind right-click → **Settings…**: pick a renderer (DXMT, Apple's D3DMetal, the
-CrossOver engine, or Wine 11's built-in), run in a fixed-size window
-(fixes old games that crash on fullscreen mode switches), Retina rendering, MSync, Metal HUD, launch arguments.
+**The library.** Games show as covers or as a list (name, renderer, last played, play time), with a
+sidebar for Recent, Favorites and each renderer, search, sorting and a cover-size slider. Select a game
+and the bar along the bottom has Play, Configure and everything else that right-click offers.
+
+**Covers.** When a game is added, Decanter looks its name up once in the Steam store (a public search, no
+account) and uses the cover if the title clearly matches. Nothing but the name is sent, and
+*Decanter → Settings…* turns this off. You can also drop an image on a game, choose one, or pick from
+search results under right-click → **Cover**. Games without a cover show the icon from their `.exe`.
+
+Per-game settings live behind **Configure…**, in four tabs. *Game Info*: name, cover, favorite, play
+time and what was detected. *Game Options*: the program, launch arguments and working folder. *Graphics*:
+the renderer (DXMT, Apple's D3DMetal, the CrossOver engine, or Wine 11's built-in), a fixed-size window
+(fixes old games that crash on fullscreen mode switches), Retina rendering and the Metal HUD. *System*:
+MSync, DLL overrides (for mod loaders), environment variables, and Wine's own configuration and registry
+editor.
 
 Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete that folder to uninstall.
 
