@@ -1,0 +1,94 @@
+import DecanterCore
+import SwiftUI
+
+@main
+struct DecanterApp: App {
+    @State private var model = AppModel()
+
+    init() {
+        // Lets `swift run Decanter` behave like a real app (Dock icon, key window) without a bundle.
+        NSApplication.shared.setActivationPolicy(.regular)
+    }
+
+    var body: some Scene {
+        WindowGroup("Decanter") {
+            RootView()
+                .environment(model)
+                .frame(minWidth: 720, minHeight: 480)
+                .onAppear { NSApp.activate(ignoringOtherApps: true) }
+                .onOpenURL { model.add($0) }
+        }
+        .defaultSize(width: 960, height: 640)
+        .commands { CommandGroup(replacing: .newItem) {} }
+    }
+}
+
+struct RootView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        Group {
+            if model.runtime == nil {
+                SetupView()
+            } else {
+                LibraryView()
+            }
+        }
+        .alert("Something went wrong", isPresented: Binding(
+            get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.errorMessage ?? "")
+        }
+    }
+}
+
+struct SetupView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "wineglass.fill")
+                .font(.system(size: 64))
+                .foregroundStyle(.linearGradient(colors: [.purple, .pink], startPoint: .top, endPoint: .bottom))
+            Text("Windows games on your Mac")
+                .font(.largeTitle.bold())
+            Text("Decanter sets everything up for you: the Wine compatibility layer and a Metal renderer for DirectX. One download of about 235 MB, then just drop in your games.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 460)
+
+            switch model.setupState {
+            case .needed:
+                setupButton("Set Up")
+            case .working(let stage, let fraction):
+                VStack(spacing: 8) {
+                    if let fraction {
+                        ProgressView(value: fraction).frame(width: 320)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(stage).font(.callout).foregroundStyle(.secondary)
+                }
+                .frame(height: 60)
+            case .failed(let message):
+                Text(message)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 460)
+                setupButton("Try Again")
+            }
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func setupButton(_ title: String) -> some View {
+        Button(title) { model.runSetup() }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
+    }
+}
