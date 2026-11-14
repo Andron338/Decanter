@@ -22,6 +22,13 @@ and lets you pick the engine it installs on (Wine 11, the CrossOver engine for o
 when D3DMetal is installed). While the installer runs you can cancel it, or tell Decanter it is done if it
 left a launcher or the game open. Installers get a private desktop, so no `.lnk` files land on your Mac's.
 Right-click a game → **Run Patch or Installer…** runs a patch, DLC or missing component in that game's bottle.
+*Install Steam…* downloads Valve's own installer for the Windows Steam client (about 2 MB, from Steam's
+servers) and runs it the same way, offering a bottle named Steam on the one engine the Steam client runs
+on: Sikarugir's Wine 10 (about 160 MB, fetched the first time). Stock Wine 11 can't draw Steam's window and
+CrossOver's Wine 9 can't complete Steam's internal connection on current macOS; Wine 10 with CrossOver's
+fixes does both. Games started from Steam run on Steam's engine, so it gets the same DXMT overlay as the
+main Wine for DirectX 10/11. Confirmed so far: signing in, downloading, and a DirectX 11 game (Rise of
+Nations: Extended Edition) reaching its menu.
 
 **Bottles.** A bottle is a named Windows environment that any number of games share, so patches, add-ons
 and multi-disc installers find what is already installed. Everything goes in the default bottle unless you

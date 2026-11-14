@@ -16,6 +16,8 @@ struct InstallRequest: Identifiable {
     let kind: InstallerKind?
     /// The bottle to offer first; the default one when nil.
     var bottleID: UUID?
+    /// Offer a new bottle with this name instead, unless one already has it.
+    var newBottleName: String?
 }
 
 /// Where an installer should run.
@@ -183,6 +185,23 @@ final class AppModel {
         guard runtime != nil, isWindowsProgram(url) else { return }
         installRequest = InstallRequest(installer: url, kind: InstallerDetector.kind(of: url),
                                         bottleID: bottleID ?? sharedBottle().id)
+    }
+
+    /// Downloads Valve's installer for the Windows Steam client and offers to run it, in a bottle of
+    /// its own unless there already is a Steam bottle.
+    func installSteam() {
+        guard runtime != nil, busyMessage == nil else { return }
+        busyMessage = "Downloading the Steam installer…"
+        Task {
+            defer { busyMessage = nil }
+            do {
+                let file = try await SteamInstaller.download()
+                installRequest = InstallRequest(installer: file, kind: InstallerDetector.kind(of: file),
+                                                bottleID: nil, newBottleName: SteamInstaller.bottleName)
+            } catch {
+                errorMessage = "Couldn't download Steam: \(error.localizedDescription)"
+            }
+        }
     }
 
     /// Runs an installer in a bottle, then adds what it installed to the library. With nothing chosen
@@ -479,6 +498,19 @@ final class AppModel {
             busyMessage = "Getting the engine for older games (about 165 MB, one time)…"
             defer { busyMessage = previous }
             runtime = try await RuntimeManager.installCrossOver(into: runtime) { progress in
+                Task { @MainActor in
+                    guard self.busyMessage != nil else { return }
+                    let percent = progress.fraction.map { " \(Int($0 * 100))%" } ?? ""
+                    self.busyMessage = progress.stage + percent
+                }
+            }
+            self.runtime = runtime
+        }
+        if renderer == .sikarugir && (!runtime.hasSikarugir || runtime.sikarugirLacksDXMT) {
+            let previous = busyMessage
+            busyMessage = runtime.hasSikarugir ? "Updating the engine for Steam…" : "Getting the engine for Steam (about 160 MB, one time)…"
+            defer { busyMessage = previous }
+            runtime = try await RuntimeManager.installSikarugir(into: runtime) { progress in
                 Task { @MainActor in
                     guard self.busyMessage != nil else { return }
                     let percent = progress.fraction.map { " \(Int($0 * 100))%" } ?? ""

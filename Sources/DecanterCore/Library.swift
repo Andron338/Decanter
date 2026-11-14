@@ -222,6 +222,7 @@ public enum BottleStore {
         case .wine: name = "prefix"
         case .gptk: name = "gptk-prefix"
         case .crossover: name = "cx-prefix"
+        case .sikarugir: name = "sk-prefix"
         }
         return Paths.template.appendingPathComponent(name, isDirectory: true)
     }

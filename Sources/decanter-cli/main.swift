@@ -15,6 +15,33 @@ let report: ProgressHandler = { progress in
     }
 }
 
+/// Runs an installer in a new bottle, which the app then lists like any other, and prints what it added.
+func install(_ file: URL, bottleName: String, engine: Engine, arguments: String) async throws {
+    guard var runtime = RuntimeManager.load() else { throw DecanterError("Run `decanter-cli setup` first.") }
+    // The optional engines are fetched the first time something is installed on them, as in the app.
+    if engine == .sikarugir, !runtime.hasSikarugir || runtime.sikarugirLacksDXMT { runtime = try await RuntimeManager.installSikarugir(into: runtime, progress: report) }
+    if engine == .crossover, !runtime.hasCrossOver { runtime = try await RuntimeManager.installCrossOver(into: runtime, progress: report) }
+    guard runtime.has(engine) else { throw DecanterError("That engine isn't installed.") }
+    var list = BottleStore.loadAdopting()
+    var bottle = Bottle(name: bottleName)
+    let prefixID = try await BottleStore.ensurePrefix(for: engine, in: bottle)
+    bottle.prefixes[engine.rawValue] = prefixID
+    bottle.lastEngine = engine.rawValue
+    list.bottles.append(bottle)
+    BottleStore.save(list)
+    let prefix = BottleStore.prefix(prefixID)
+    GameInstaller.isolateDesktop(prefix: prefix)
+    let before = BottleSnapshot.take(prefix: prefix)
+    print("Running the installer in bottle “\(bottle.name)” (\(prefixID.uuidString))…")
+    try await GameInstaller.run(file, prefix: prefix, engine: engine, runtime: runtime, arguments: arguments)
+    let programs = GameInstaller.installedPrograms(prefix: prefix, since: before)
+    if programs.isEmpty { print("Nothing new was installed.") }
+    let choice = GameInstaller.obviousChoice(among: programs)
+    for program in programs {
+        print("\(program == choice ? "→" : " ") \(program.name)\(program.hasShortcut ? " (shortcut)" : ""): \(program.executable.path)")
+    }
+}
+
 do {
     switch command {
     case "setup":
@@ -25,6 +52,9 @@ do {
     case "crossover":
         guard let runtime = RuntimeManager.load() else { throw DecanterError("Run `decanter-cli setup` first.") }
         print(try await RuntimeManager.installCrossOver(into: runtime, progress: report).summary)
+    case "sikarugir":
+        guard let runtime = RuntimeManager.load() else { throw DecanterError("Run `decanter-cli setup` first.") }
+        print(try await RuntimeManager.installSikarugir(into: runtime, progress: report).summary)
     case "status":
         if let runtime = RuntimeManager.load() {
             print(runtime.summary)
@@ -57,28 +87,19 @@ do {
         // decanter-cli install <installer> [wine|crossover|gptk] [installer arguments]
         let arguments = Array(CommandLine.arguments.dropFirst(2))
         guard let path = arguments.first else { throw DecanterError("usage: decanter-cli install <installer> [engine]") }
-        guard let runtime = RuntimeManager.load() else { throw DecanterError("Run `decanter-cli setup` first.") }
-        let engine = arguments.dropFirst().first.flatMap(Engine.init(rawValue:)) ?? .wine
-        // Installs go in a bottle of their own, which the app then lists like any other.
-        var list = BottleStore.loadAdopting()
-        var bottle = Bottle(name: GameNaming.displayName(for: URL(fileURLWithPath: path)))
-        let prefixID = try await BottleStore.ensurePrefix(for: engine, in: bottle)
-        bottle.prefixes[engine.rawValue] = prefixID
-        bottle.lastEngine = engine.rawValue
-        list.bottles.append(bottle)
-        BottleStore.save(list)
-        let prefix = BottleStore.prefix(prefixID)
-        GameInstaller.isolateDesktop(prefix: prefix)
-        let before = BottleSnapshot.take(prefix: prefix)
-        print("Running the installer in bottle “\(bottle.name)” (\(prefixID.uuidString))…")
-        try await GameInstaller.run(URL(fileURLWithPath: path), prefix: prefix, engine: engine, runtime: runtime,
-                                    arguments: arguments.dropFirst(2).joined(separator: " "))
-        let programs = GameInstaller.installedPrograms(prefix: prefix, since: before)
-        if programs.isEmpty { print("Nothing new was installed.") }
-        let choice = GameInstaller.obviousChoice(among: programs)
-        for program in programs {
-            print("\(program == choice ? "→" : " ") \(program.name)\(program.hasShortcut ? " (shortcut)" : ""): \(program.executable.path)")
-        }
+        let file = URL(fileURLWithPath: path)
+        try await install(file, bottleName: GameNaming.displayName(for: file),
+                          engine: arguments.dropFirst().first.flatMap(Engine.init(rawValue:)) ?? .wine,
+                          arguments: arguments.dropFirst(2).joined(separator: " "))
+    case "steam":
+        // decanter-cli steam [wine|crossover|gptk] [installer arguments]: what the app's "Install Steam…" does.
+        let arguments = Array(CommandLine.arguments.dropFirst(2))
+        print("Downloading \(SteamInstaller.source.absoluteString)…")
+        let file = try await SteamInstaller.download()
+        print("Saved \(file.path)\(InstallerDetector.kind(of: file).map { " (\($0.displayName))" } ?? "")")
+        try await install(file, bottleName: SteamInstaller.bottleName,
+                          engine: arguments.first.flatMap(Engine.init(rawValue:)) ?? SteamInstaller.engine,
+                          arguments: arguments.dropFirst().joined(separator: " "))
     case "scan":
         // decanter-cli scan <prefix id> [engine]: everything in a prefix that its template didn't have.
         let arguments = Array(CommandLine.arguments.dropFirst(2))
@@ -89,7 +110,7 @@ do {
             print("\(program.name)\(program.hasShortcut ? " (shortcut)" : ""): \(program.executable.path) \(program.arguments)")
         }
     default:
-        print("usage: decanter-cli [setup|d3dmetal|crossover|status|inspect <exe>…|icon <exe> <out.ico>|install <installer> [engine]|scan <prefix id> [engine]]")
+        print("usage: decanter-cli [setup|d3dmetal|crossover|sikarugir|status|inspect <exe>…|icon <exe> <out.ico>|install <installer> [engine]|steam [engine]|scan <prefix id> [engine]]")
         exit(2)
     }
 } catch {

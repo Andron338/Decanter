@@ -219,6 +219,7 @@ struct GameSettingsSheet: View {
                     Text("Metal — DXMT (DirectX 10/11)").tag(Renderer.metal)
                     Text("D3DMetal — Apple (DirectX 11/12)").tag(Renderer.d3dmetal)
                     Text("CrossOver engine (DirectX 9 and older, 32-bit)").tag(Renderer.crossover)
+                    Text("Wine 10 (Steam)").tag(Renderer.sikarugir)
                     Text("Wine 11 built-in").tag(Renderer.wine)
                 }
                 if game.settings.renderer == .crossover {

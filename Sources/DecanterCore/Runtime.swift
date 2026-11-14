@@ -11,6 +11,9 @@ public enum Renderer: String, Codable, CaseIterable, Identifiable, Sendable {
     /// CrossOver's Wine 9 with its built-in renderers. The most compatible choice for 32-bit and
     /// Direct3D 9-era games; downloaded the first time a game needs it.
     case crossover
+    /// Sikarugir's Wine 10 with its built-in renderers. The one engine the Windows Steam client runs
+    /// on; downloaded the first time something needs it.
+    case sikarugir
 
     public var id: String { rawValue }
 }
@@ -21,6 +24,10 @@ public enum Engine: String, Sendable, CaseIterable {
     case gptk
     /// CodeWeavers' open-source CrossOver Wine, as packaged for Sikarugir.
     case crossover
+    /// Wine 10 with CrossOver's application fixes, as built for Sikarugir. Steam needs both a fix that
+    /// stock Wine lacks (its browser must draw in-process) and one CrossOver's Wine 9 lacks on current
+    /// macOS (telling which process owns a local connection).
+    case sikarugir
 }
 
 public struct InstalledRuntime: Codable, Equatable {
@@ -36,6 +43,9 @@ public struct InstalledRuntime: Codable, Equatable {
     public var crossoverTag: String?
     /// Wine root of the CrossOver engine, if installed.
     public var crossoverPath: String?
+    public var sikarugirTag: String?
+    /// Wine root of the Sikarugir Wine 10 engine, if installed.
+    public var sikarugirPath: String?
 
     public init(wineTag: String, dxmtTag: String? = nil, basePath: String, metalPath: String? = nil,
                 gptkTag: String? = nil, gptkPath: String? = nil) {
@@ -49,12 +59,19 @@ public struct InstalledRuntime: Codable, Equatable {
 
     public var hasD3DMetal: Bool { gptkPath != nil }
     public var hasCrossOver: Bool { crossoverPath != nil }
+    public var hasSikarugir: Bool { sikarugirPath != nil }
+    /// Installed before it came with DXMT: installing it again adds the overlay without downloading.
+    public var sikarugirLacksDXMT: Bool {
+        guard let sikarugirPath, dxmtTag != nil else { return false }
+        return !sikarugirPath.contains("+dxmt-")
+    }
 
     public func has(_ engine: Engine) -> Bool {
         switch engine {
         case .wine: return true
         case .gptk: return hasD3DMetal
         case .crossover: return hasCrossOver
+        case .sikarugir: return hasSikarugir
         }
     }
 
@@ -64,6 +81,7 @@ public struct InstalledRuntime: Codable, Equatable {
         case .d3dmetal: return gptkPath != nil ? .d3dmetal : effectiveRenderer(.metal)
         case .metal: return metalPath != nil ? .metal : .wine
         case .crossover: return crossoverPath != nil ? .crossover : .wine
+        case .sikarugir: return sikarugirPath != nil ? .sikarugir : .wine
         case .wine: return .wine
         }
     }
@@ -72,15 +90,21 @@ public struct InstalledRuntime: Codable, Equatable {
         switch effectiveRenderer(renderer) {
         case .d3dmetal: return .gptk
         case .crossover: return .crossover
+        case .sikarugir: return .sikarugir
         case .metal, .wine: return .wine
         }
     }
 
-    /// The CrossOver engine archive ships without its support libraries (libinotify, FreeType, GnuTLS…)
+    /// Sikarugir's engine archives ship without their support libraries (libinotify, FreeType, GnuTLS…)
     /// because a wrapper app normally supplies them. Decanter's main Wine carries compatible copies.
     public func libraryFallback(for engine: Engine) -> String? {
-        guard engine == .crossover else { return nil }
-        return ([crossoverPath, basePath, gptkPath].compactMap { $0 }.map { $0 + "/lib" } + ["/usr/local/lib", "/usr/lib"])
+        let own: String?
+        switch engine {
+        case .crossover: own = crossoverPath
+        case .sikarugir: own = sikarugirPath
+        case .wine, .gptk: return nil
+        }
+        return ([own, basePath, gptkPath].compactMap { $0 }.map { $0 + "/lib" } + ["/usr/local/lib", "/usr/lib"])
             .joined(separator: ":")
     }
 
@@ -90,6 +114,7 @@ public struct InstalledRuntime: Codable, Equatable {
         case .d3dmetal: path = gptkPath ?? basePath
         case .metal: path = metalPath ?? basePath
         case .crossover: path = crossoverPath ?? basePath
+        case .sikarugir: path = sikarugirPath ?? basePath
         case .wine: path = basePath
         }
         return URL(fileURLWithPath: path, isDirectory: true)
@@ -114,6 +139,7 @@ public struct InstalledRuntime: Codable, Equatable {
         if let dxmtTag { parts.append("DXMT \(dxmtTag)") }
         if gptkPath != nil { parts.append("D3DMetal") }
         if crossoverPath != nil { parts.append("CrossOver") }
+        if sikarugirPath != nil { parts.append("Wine 10") }
         return parts.joined(separator: " · ")
     }
 }
@@ -133,6 +159,8 @@ public enum RuntimeManager {
     static let gptkRepo = "Gcenx/game-porting-toolkit"
     static let crossoverRepo = "Sikarugir-App/Engines"
     static let crossoverPrefix = "WS12WineCX"
+    /// The Wine 10.0 line is the one Steam was seen working on; newer lines are untried.
+    static let sikarugirPrefix = "WS12WineSikarugir10.0_"
     static let dxmtArchDirs = ["x86_64-windows", "x86_64-unix", "i386-windows"]
 
     /// Apple's licence for D3DMetal, as linked from the Game Porting Toolkit binary releases.
@@ -153,6 +181,11 @@ public enum RuntimeManager {
            !FileManager.default.isExecutableFile(atPath: crossover + "/bin/wineserver") || !BottleStore.templateReady(.crossover) {
             runtime.crossoverPath = nil
             runtime.crossoverTag = nil
+        }
+        if let sikarugir = runtime.sikarugirPath,
+           !FileManager.default.isExecutableFile(atPath: sikarugir + "/bin/wineserver") || !BottleStore.templateReady(.sikarugir) {
+            runtime.sikarugirPath = nil
+            runtime.sikarugirTag = nil
         }
         return runtime
     }
@@ -212,17 +245,52 @@ public enum RuntimeManager {
         return runtime
     }
 
+    /// Optional add-on: Sikarugir's Wine 10, for the Windows Steam client.
+    public static func installSikarugir(
+        into current: InstalledRuntime, progress: @escaping ProgressHandler
+    ) async throws -> InstalledRuntime {
+        progress(.init(stage: "Finding the Wine 10 engine…", fraction: nil))
+        let (tag, asset) = try await newestEngine(named: sikarugirPrefix, label: "Wine 10")
+        let directory = Paths.runtimes.appendingPathComponent("sk-\(tag)", isDirectory: true)
+        var root = try await installWineArchive(asset, into: directory, label: "Wine 10 engine", progress: progress)
+        // The engine's own Direct3D 11 can't run on a Mac, so games started from Steam (which run on
+        // Steam's engine) get DXMT the same way the main Wine does. Without DXMT it stays as it is.
+        if let dxmtTag = current.dxmtTag {
+            let component = Paths.components.appendingPathComponent("dxmt-\(dxmtTag)", isDirectory: true)
+            let overlayDir = Paths.runtimes.appendingPathComponent("sk-\(tag)+dxmt-\(dxmtTag)", isDirectory: true)
+            let overlayRoot = URL(fileURLWithPath: overlayDir.path + root.path.dropFirst(directory.path.count), isDirectory: true)
+            if FileManager.default.fileExists(atPath: overlayDir.appendingPathComponent(overlayMarker).path) {
+                root = overlayRoot
+            } else if FileManager.default.fileExists(atPath: component.path) {
+                progress(.init(stage: "Adding the Metal renderer to the Wine 10 engine…", fraction: nil))
+                if (try? await overlayDXMT(from: component, onto: directory, as: overlayDir, root: overlayRoot)) != nil {
+                    root = overlayRoot
+                }
+            }
+        }
+        var runtime = current
+        runtime.sikarugirTag = tag
+        runtime.sikarugirPath = root.path
+        try await buildTemplate(.sikarugir, runtime: runtime, renderer: .sikarugir, progress: progress)
+        try save(runtime)
+        return runtime
+    }
+
+    /// One release of the engines repository holds every build; the newest of a line sorts last.
+    private static func newestEngine(named prefix: String, label: String) async throws -> (tag: String, asset: GitHubRelease.Asset) {
+        let assets = try await GitHub.releases(crossoverRepo).flatMap(\.assets)
+            .filter { $0.name.hasPrefix(prefix) && $0.name.hasSuffix(".tar.xz") }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        guard let asset = assets.last else { throw DecanterError("No \(label) engine found in \(crossoverRepo).") }
+        return (String(asset.name.dropLast(".tar.xz".count)), asset)
+    }
+
     /// Optional add-on: CrossOver's Wine 9, for 32-bit and Direct3D 9-era games that the main Wine can't run.
     public static func installCrossOver(
         into current: InstalledRuntime, progress: @escaping ProgressHandler
     ) async throws -> InstalledRuntime {
         progress(.init(stage: "Finding the CrossOver engine…", fraction: nil))
-        // One release holds every engine build; take the newest CrossOver one (names sort naturally).
-        let assets = try await GitHub.releases(crossoverRepo).flatMap(\.assets)
-            .filter { $0.name.hasPrefix(crossoverPrefix) && $0.name.hasSuffix(".tar.xz") }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        guard let asset = assets.last else { throw DecanterError("No CrossOver engine found in \(crossoverRepo).") }
-        let tag = String(asset.name.dropLast(".tar.xz".count))
+        let (tag, asset) = try await newestEngine(named: crossoverPrefix, label: "CrossOver")
         let directory = Paths.runtimes.appendingPathComponent("cx-\(tag)", isDirectory: true)
         let root = try await installWineArchive(asset, into: directory, label: "CrossOver engine", progress: progress)
         var runtime = current
@@ -286,7 +354,7 @@ public enum RuntimeManager {
         let fm = FileManager.default
         let (tag, asset) = try await latestAsset(repo: dxmtRepo) { $0.contains("builtin") && $0.hasSuffix(".tar.gz") }
         let overlayDir = Paths.runtimes.appendingPathComponent("wine-\(wineTag)+dxmt-\(tag)", isDirectory: true)
-        let marker = overlayDir.appendingPathComponent(".decanter-overlay-complete")
+        let marker = overlayDir.appendingPathComponent(overlayMarker)
         let relativeRoot = String(baseRoot.path.dropFirst(wineDir.path.count))
         let overlayRoot = URL(fileURLWithPath: overlayDir.path + relativeRoot, isDirectory: true)
         if fm.fileExists(atPath: marker.path) { return (tag, overlayRoot) }
@@ -300,10 +368,18 @@ public enum RuntimeManager {
         try await Shell.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", componentDir.path], check: false)
         try? fm.removeItem(at: archive)
 
-        // Stock Wine searches its own DLL dir before WINEDLLPATH, so DXMT's builtin DLLs must replace
-        // Wine's d3d11/dxgi/d3d10core in place. Do that on an APFS clone (near-zero disk) so the
-        // pristine runtime stays available as a per-game fallback.
         progress(.init(stage: "Installing Metal renderer…", fraction: nil))
+        try await overlayDXMT(from: componentDir, onto: wineDir, as: overlayDir, root: overlayRoot)
+        return (tag, overlayRoot)
+    }
+
+    static let overlayMarker = ".decanter-overlay-complete"
+
+    /// Stock Wine searches its own DLL dir before WINEDLLPATH, so DXMT's builtin DLLs must replace
+    /// Wine's d3d11/dxgi/d3d10core in place. Do that on an APFS clone (near-zero disk) so the
+    /// pristine runtime stays available as a per-game fallback.
+    static func overlayDXMT(from componentDir: URL, onto wineDir: URL, as overlayDir: URL, root overlayRoot: URL) async throws {
+        let fm = FileManager.default
         try? fm.removeItem(at: overlayDir)
         try await Shell.run("/bin/cp", ["-Rcp", wineDir.path, overlayDir.path])
 
@@ -322,8 +398,7 @@ public enum RuntimeManager {
             try? fm.removeItem(at: overlayDir)
             throw DecanterError("unexpected DXMT archive layout")
         }
-        fm.createFile(atPath: marker.path, contents: nil)
-        return (tag, overlayRoot)
+        fm.createFile(atPath: overlayDir.appendingPathComponent(overlayMarker).path, contents: nil)
     }
 
     private static func latestAsset(

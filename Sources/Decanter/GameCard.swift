@@ -8,6 +8,7 @@ extension Renderer {
         case .metal: return "DXMT"
         case .d3dmetal: return "D3DMetal"
         case .crossover: return "CrossOver"
+        case .sikarugir: return "Wine 10"
         case .wine: return "Wine 11"
         }
     }
@@ -17,6 +18,7 @@ extension Renderer {
         case .metal: return "cube"
         case .d3dmetal: return "apple.logo"
         case .crossover: return "clock.arrow.circlepath"
+        case .sikarugir: return "gamecontroller"
         case .wine: return "wineglass"
         }
     }

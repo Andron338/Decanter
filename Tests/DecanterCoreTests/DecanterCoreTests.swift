@@ -171,6 +171,38 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(Size(width: 1280, height: 800).text, "1280x800")
     }
 
+    func testSteamDownloadMustBeAWindowsProgram() throws {
+        let folder = try temporaryFolder()
+        let page = folder.appendingPathComponent("SteamSetup.exe")
+        try Data("<html>Sign in to this network</html>".utf8).write(to: page)
+        XCTAssertFalse(SteamInstaller.isWindowsProgram(page))
+        try makePE(is64Bit: false, imports: ["KERNEL32.dll"]).write(to: page)
+        XCTAssertTrue(SteamInstaller.isWindowsProgram(page))
+        XCTAssertEqual(SteamInstaller.source.scheme, "https")
+        XCTAssertEqual(SteamInstaller.destination.lastPathComponent, "SteamSetup.exe")
+    }
+
+    func testSteamRunsOnTheSikarugirEngine() {
+        var runtime = InstalledRuntime(wineTag: "11.0", basePath: "/rt/wine")
+        // Not downloaded yet: fall back to the main Wine rather than point at nothing.
+        XCTAssertFalse(runtime.has(.sikarugir))
+        XCTAssertEqual(runtime.engine(for: .sikarugir), .wine)
+        runtime.sikarugirPath = "/rt/sk"
+        XCTAssertEqual(runtime.engine(for: .sikarugir), .sikarugir)
+        XCTAssertEqual(runtime.wine(for: .sikarugir).path, "/rt/sk/bin/wine")
+        // The archive has no support libraries of its own; the main Wine's are borrowed.
+        XCTAssertEqual(runtime.libraryFallback(for: .sikarugir), "/rt/sk/lib:/rt/wine/lib:/usr/local/lib:/usr/lib")
+        XCTAssertNil(runtime.libraryFallback(for: .wine))
+        XCTAssertEqual(GameInstaller.renderer(for: SteamInstaller.engine), .sikarugir)
+        // An engine installed before it got DXMT is topped up, but only when DXMT itself is installed.
+        XCTAssertFalse(runtime.sikarugirLacksDXMT)
+        runtime.dxmtTag = "v0.80"
+        XCTAssertTrue(runtime.sikarugirLacksDXMT)
+        runtime.sikarugirPath = "/rt/sk-10.0_8+dxmt-v0.80/wswine.bundle"
+        XCTAssertFalse(runtime.sikarugirLacksDXMT)
+        XCTAssertEqual(BottleStore.templatePrefix(.sikarugir).lastPathComponent, "sk-prefix")
+    }
+
     func testMsiGoesThroughMsiexec() {
         let game = Game(name: "X", executablePath: "/tmp/thing.msi", bottleID: UUID())
         XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments, ["msiexec", "/i", #"Z:\tmp\thing.msi"#])
