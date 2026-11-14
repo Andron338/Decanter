@@ -20,6 +20,31 @@ struct DecanterApp: App {
         }
         .defaultSize(width: 960, height: 640)
         .commands { CommandGroup(replacing: .newItem) {} }
+
+        Settings {
+            PreferencesView().environment(model)
+        }
+    }
+}
+
+struct PreferencesView: View {
+    @Environment(AppModel.self) private var model
+    @AppStorage("autoCovers") private var autoCovers = true
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Find cover art automatically", isOn: $autoCovers)
+            } footer: {
+                Text("Decanter looks each new game's name up in the Steam store, once, and uses the cover if the title matches. Nothing else is sent. You can always set a cover yourself.")
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
+        .onChange(of: autoCovers) { _, enabled in
+            if enabled { model.fetchMissingCovers() }
+        }
     }
 }
 

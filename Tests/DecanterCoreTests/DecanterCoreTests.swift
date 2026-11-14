@@ -3,14 +3,16 @@ import XCTest
 
 final class DecanterCoreTests: XCTestCase {
     let runtime = InstalledRuntime(wineTag: "11.21", dxmtTag: "v0.80", basePath: "/rt/base", metalPath: "/rt/metal")
+    /// Where the plans below are told the game's bottle keeps its prefix.
+    let prefix = URL(fileURLWithPath: "/bottles/x/prefix")
 
     func testPlanUsesMetalRuntimeByDefault() {
         let game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
-        let plan = Launcher.plan(game: game, runtime: runtime)
+        let plan = Launcher.plan(game: game, prefix: prefix, runtime: runtime)
         XCTAssertEqual(plan.executable.path, "/rt/metal/bin/wine")
         XCTAssertEqual(plan.arguments, ["/Games/X/x.exe"])
         XCTAssertEqual(plan.workingDirectory.path, "/Games/X")
-        XCTAssertEqual(plan.environment["WINEPREFIX"], BottleStore.prefix(game.bottleID).path)
+        XCTAssertEqual(plan.environment["WINEPREFIX"], prefix.path)
         XCTAssertEqual(plan.environment["WINEMSYNC"], "1")
         XCTAssertNil(plan.environment["MTL_HUD_ENABLED"])
     }
@@ -18,52 +20,94 @@ final class DecanterCoreTests: XCTestCase {
     func testPlanFallsBackToBaseRuntime() {
         var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
         game.settings.renderer = .wine
-        XCTAssertEqual(Launcher.plan(game: game, runtime: runtime).executable.path, "/rt/base/bin/wine")
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).executable.path, "/rt/base/bin/wine")
 
         var noMetal = runtime
         noMetal.metalPath = nil
         game.settings.renderer = .metal
-        XCTAssertEqual(Launcher.plan(game: game, runtime: noMetal).executable.path, "/rt/base/bin/wine")
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: noMetal).executable.path, "/rt/base/bin/wine")
     }
 
-    func testD3DMetalUsesItsOwnEngineAndBottle() {
+    func testD3DMetalUsesItsOwnEngine() {
         var withGPTK = runtime
         withGPTK.gptkPath = "/rt/gptk"
         var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
-        game.gptkBottleID = UUID()
         game.settings.renderer = .d3dmetal
         game.settings.rayTracing = true
-        let plan = Launcher.plan(game: game, runtime: withGPTK)
+        XCTAssertEqual(withGPTK.engine(for: .d3dmetal), .gptk)
+        let plan = Launcher.plan(game: game, prefix: prefix, runtime: withGPTK)
         XCTAssertEqual(plan.executable.path, "/rt/gptk/bin/wine64")
-        XCTAssertEqual(plan.environment["WINEPREFIX"], BottleStore.prefix(game.gptkBottleID!).path)
         XCTAssertEqual(plan.environment["D3DM_SUPPORT_DXR"], "1")
         XCTAssertNil(plan.environment["D3DM_ENABLE_METALFX"])
 
-        // Not installed: falls back to DXMT in the standard bottle, with no D3DMetal variables.
-        let fallback = Launcher.plan(game: game, runtime: runtime)
+        // Not installed: falls back to DXMT on the standard engine, with no D3DMetal variables.
+        XCTAssertEqual(runtime.engine(for: .d3dmetal), .wine)
+        XCTAssertFalse(runtime.has(.gptk))
+        let fallback = Launcher.plan(game: game, prefix: prefix, runtime: runtime)
         XCTAssertEqual(fallback.executable.path, "/rt/metal/bin/wine")
-        XCTAssertEqual(fallback.environment["WINEPREFIX"], BottleStore.prefix(game.bottleID).path)
         XCTAssertNil(fallback.environment["D3DM_SUPPORT_DXR"])
     }
 
-    func testCrossOverUsesItsOwnEngineBottleAndBorrowedLibraries() {
+    func testCrossOverUsesItsOwnEngineAndBorrowedLibraries() {
         var withCX = runtime
         withCX.crossoverPath = "/rt/cx"
         var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
         game.settings.renderer = .crossover
-        XCTAssertNil(game.existingBottle(for: .crossover))
-        game.setBottle(UUID(), for: .crossover)
-        let plan = Launcher.plan(game: game, runtime: withCX)
+        let plan = Launcher.plan(game: game, prefix: prefix, runtime: withCX)
         XCTAssertEqual(plan.executable.path, "/rt/cx/bin/wine")
-        XCTAssertEqual(plan.environment["WINEPREFIX"], BottleStore.prefix(game.crossoverBottleID!).path)
+        XCTAssertEqual(plan.environment["WINEPREFIX"], prefix.path)
         XCTAssertEqual(plan.environment["DYLD_FALLBACK_LIBRARY_PATH"], "/rt/cx/lib:/rt/base/lib:/usr/local/lib:/usr/lib")
-        XCTAssertEqual(game.bottles.count, 2)
 
-        // Not installed yet: runs on the main Wine in the standard bottle, with no library override.
-        let fallback = Launcher.plan(game: game, runtime: runtime)
+        // Not installed yet: runs on the main Wine, with no library override.
+        let fallback = Launcher.plan(game: game, prefix: prefix, runtime: runtime)
         XCTAssertEqual(fallback.executable.path, "/rt/base/bin/wine")
-        XCTAssertEqual(fallback.environment["WINEPREFIX"], BottleStore.prefix(game.bottleID).path)
         XCTAssertNil(fallback.environment["DYLD_FALLBACK_LIBRARY_PATH"])
+    }
+
+    func testBottleKeepsAPrefixPerEngine() {
+        var bottle = Bottle(name: " ")
+        XCTAssertEqual(bottle.displayName, "Untitled Bottle")
+        XCTAssertNil(bottle.prefix(for: .crossover))
+        XCTAssertEqual(bottle.installEngine, .wine)
+        let folder = UUID()
+        bottle.prefixes[Engine.crossover.rawValue] = folder
+        XCTAssertEqual(bottle.prefix(for: .crossover), BottleStore.prefix(folder))
+        XCTAssertEqual(bottle.engines, [.crossover])
+        // With nothing recorded, installers go where the bottle already has something.
+        XCTAssertEqual(bottle.installEngine, .crossover)
+        bottle.lastEngine = Engine.gptk.rawValue
+        XCTAssertEqual(bottle.installEngine, .gptk)
+        let saved = try? JSONDecoder().decode(Bottle.self, from: JSONEncoder().encode(bottle))
+        XCTAssertEqual(saved, bottle)
+    }
+
+    func testOlderLibrariesKeepTheirBottles() {
+        let shared = UUID(), cx = UUID(), gptk = UUID(), otherCX = UUID()
+        var first = Game(name: "First", executablePath: "/g/a.exe", bottleID: shared)
+        first.crossoverBottleID = cx
+        var second = Game(name: "Second", executablePath: "/g/b.exe", bottleID: shared)
+        second.crossoverBottleID = otherCX
+        second.gptkBottleID = gptk
+        let alone = Game(name: "Alone", executablePath: "/g/c.exe", bottleID: UUID())
+        var games = [first, second, alone]
+        var list = BottleList()
+        let changed = BottleStore.adopt(games: &games, into: &list)
+        XCTAssertTrue(changed.bottles && changed.games)
+        XCTAssertEqual(list.bottles.map(\.name), ["First + 1 more", "Alone"])
+        XCTAssertNil(list.defaultID)
+        // The bottle's id is the game's old one, so the library needs no rewriting.
+        XCTAssertEqual(list.bottles[0].id, shared)
+        XCTAssertEqual(list.bottles[0].prefixID(for: .wine), shared)
+        XCTAssertEqual(list.bottles[0].prefixID(for: .crossover), cx)
+        XCTAssertEqual(list.bottles[0].prefixID(for: .gptk), gptk)
+        XCTAssertEqual(list.bottles[1].engines, [.wine])
+        XCTAssertTrue(games.allSatisfy { $0.gptkBottleID == nil && $0.crossoverBottleID == nil })
+
+        // A second pass has nothing left to do, and renamed bottles keep their names.
+        list.bottles[1].name = "Mine"
+        let again = BottleStore.adopt(games: &games, into: &list)
+        XCTAssertFalse(again.bottles || again.games)
+        XCTAssertEqual(list.bottles.map(\.name), ["First + 1 more", "Mine"])
     }
 
     func testOldSettingsStillDecode() throws {
@@ -79,7 +123,7 @@ final class DecanterCoreTests: XCTestCase {
         game.settings.virtualDesktop = true
         game.settings.virtualDesktopSize = "1280x720"
         game.settings.arguments = #"-windowed -name "John Doe""#
-        let plan = Launcher.plan(game: game, runtime: runtime)
+        let plan = Launcher.plan(game: game, prefix: prefix, runtime: runtime)
         XCTAssertEqual(plan.arguments, [
             "explorer", "/desktop=Decanter,1280x720", #"Z:\Games\My Game\x.exe"#, "-windowed", "-name", "John Doe",
         ])
@@ -87,7 +131,7 @@ final class DecanterCoreTests: XCTestCase {
 
     func testMsiGoesThroughMsiexec() {
         let game = Game(name: "X", executablePath: "/tmp/thing.msi", bottleID: UUID())
-        XCTAssertEqual(Launcher.plan(game: game, runtime: runtime).arguments, ["msiexec", "/i", #"Z:\tmp\thing.msi"#])
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments, ["msiexec", "/i", #"Z:\tmp\thing.msi"#])
     }
 
     func testInstallerDetection() {
@@ -223,7 +267,9 @@ final class DecanterCoreTests: XCTestCase {
     }
 
     /// A shortcut as Windows writes it: ID list, link info with an ANSI path, Unicode strings.
-    private func makeShortcut(target: String, arguments: String = "", workingDirectory: String = "") -> Data {
+    private func makeShortcut(
+        target: String, arguments: String = "", workingDirectory: String = "", targetBytes: [UInt8]? = nil
+    ) -> Data {
         func le(_ value: Int, _ width: Int) -> [UInt8] { (0..<width).map { UInt8((value >> (8 * $0)) & 0xFF) } }
         func counted(_ string: String) -> [UInt8] {
             le(string.utf16.count, 2) + string.utf16.flatMap { le(Int($0), 2) }
@@ -234,7 +280,7 @@ final class DecanterCoreTests: XCTestCase {
         var bytes = le(0x4C, 4) + [0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46] + le(flags, 4)
         bytes += [UInt8](repeating: 0, count: 0x4C - bytes.count)
         bytes += le(6, 2) + [4, 0, 0xAA, 0xBB, 0, 0]  // ID list: one opaque item and the terminator
-        let path = Array(target.utf8) + [0]
+        let path = (targetBytes ?? Array(target.utf8)) + [0]
         let header = 0x1C
         bytes += le(header + path.count + 1, 4) + le(header, 4) + le(1, 4) + le(0, 4)
             + le(header, 4) + le(0, 4) + le(header + path.count, 4) + path + [0]
@@ -251,6 +297,76 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(shortcut.workingDirectory, #"C:\Program Files\Foo"#)
         XCTAssertNil(WindowsShortcut(data: Data("not a shortcut".utf8)))
         XCTAssertNil(WindowsShortcut(data: makeShortcut(target: #"C:\a.exe"#).prefix(0x60)))
+    }
+
+    func testShortcutTextInTheUsersCodepage() throws {
+        // "C:\Игра\a.exe" as a Russian installer writes it: one byte per letter, codepage 1251.
+        let path: [UInt8] = Array(#"C:\"#.utf8) + [0xC8, 0xE3, 0xF0, 0xE0] + Array(#"\a.exe"#.utf8)
+        let data = makeShortcut(target: "", arguments: "\0", targetBytes: path)
+        let russian = try XCTUnwrap(WindowsShortcut(data: data, preferredLanguages: ["en-US", "uk-UA"]))
+        XCTAssertEqual(russian.target, #"C:\Игра\a.exe"#)
+        // Some installers write an argument string holding nothing but a NUL.
+        XCTAssertEqual(russian.arguments, "")
+        let western = try XCTUnwrap(WindowsShortcut(data: data, preferredLanguages: ["en-US"]))
+        XCTAssertEqual(western.target, #"C:\Èãðà\a.exe"#)
+        XCTAssertEqual(Launcher.splitArguments("\0"), [])
+        XCTAssertEqual(Launcher.splitArguments("-a\0 -b"), ["-a", "-b"])
+    }
+
+    func testWindowsLanguageFollowsTheMacsLanguages() {
+        XCTAssertEqual(WindowsLanguage.automatic(preferred: ["en-US", "uk-UA"])?.locale, "uk_UA")
+        XCTAssertEqual(WindowsLanguage.automatic(preferred: ["ru"])?.codepage, 1251)
+        XCTAssertEqual(WindowsLanguage.automatic(preferred: ["zh-Hant-TW"])?.locale, "zh_TW")
+        XCTAssertEqual(WindowsLanguage.automatic(preferred: ["zh-Hans-CN"])?.locale, "zh_CN")
+        XCTAssertNil(WindowsLanguage.automatic(preferred: ["en-US", "fr-FR"]))
+        XCTAssertEqual(WindowsLanguage.resolve("ja_JP", preferred: ["ru-RU"])?.locale, "ja_JP")
+
+        var settings = GameSettings()
+        let prefix = URL(fileURLWithPath: "/p")
+        XCTAssertEqual(Launcher.environment(prefix: prefix, settings: settings, preferredLanguages: ["en-US", "uk-UA"])["LC_ALL"],
+                       "uk_UA.UTF-8")
+        settings.language = "en_US"
+        XCTAssertEqual(Launcher.environment(prefix: prefix, settings: settings, preferredLanguages: ["ru-RU"])["LC_ALL"],
+                       "en_US.UTF-8")
+        settings.language = "ru_RU"
+        settings.environment = "LC_ALL=C"
+        XCTAssertEqual(Launcher.environment(prefix: prefix, settings: settings, preferredLanguages: [])["LC_ALL"], "C")
+    }
+
+    func testShortcutToALithTechLauncherStartsTheGame() throws {
+        let folder = try temporaryFolder()
+        let template = try makePrefix(in: folder, named: "template", files: [])
+        let prefix = try makePrefix(in: folder, named: "bottle", files: [
+            "Games/AvP2/Avp2.exe", "Games/AvP2/Lithtech.exe", "Games/AvP2/avp2cmds.txt",
+            "Games/Other/Play.exe", "Games/Other/Lithtech.exe", "users/me/Desktop/placeholder",
+        ])
+        let game = prefix.appendingPathComponent("drive_c/Games/AvP2")
+        try (Data("MZ\0LITHTECH.EXE\0\\lithtech.exe -cmdfile AVP2cmds.txt\0more".utf8))
+            .write(to: game.appendingPathComponent("Avp2.exe"))
+        let direct = try XCTUnwrap(LauncherDetector.directStart(for: game.appendingPathComponent("Avp2.exe")))
+        XCTAssertEqual(direct.executable.lastPathComponent, "Lithtech.exe")
+        XCTAssertEqual(direct.arguments, "-cmdfile avp2cmds.txt")
+        XCTAssertNil(LauncherDetector.directStart(for: game.appendingPathComponent("Lithtech.exe")))
+        // Names the engine but not how it is started, or the command file is missing: left alone.
+        let other = prefix.appendingPathComponent("drive_c/Games/Other/Play.exe")
+        XCTAssertNil(LauncherDetector.directStart(for: other))
+        try Data("lithtech.exe -cmdfile gone.txt".utf8).write(to: other)
+        XCTAssertNil(LauncherDetector.directStart(for: other))
+
+        let startMenu = prefix.appendingPathComponent("drive_c/ProgramData/Microsoft/Windows/Start Menu/Programs")
+        try FileManager.default.createDirectory(at: startMenu, withIntermediateDirectories: true)
+        try makeShortcut(target: #"C:\Games\AvP2\Avp2.exe"#).write(to: startMenu.appendingPathComponent("AvP 2.lnk"))
+        // Installers usually add a desktop shortcut to the same launcher.
+        try makeShortcut(target: #"C:\Games\AvP2\Avp2.exe"#)
+            .write(to: prefix.appendingPathComponent("drive_c/users/me/Desktop/AvP 2.lnk"))
+        let programs = GameInstaller.installedPrograms(prefix: prefix, since: .take(prefix: template))
+        let choice = try XCTUnwrap(GameInstaller.obviousChoice(among: programs))
+        XCTAssertEqual(choice.name, "AvP 2")
+        XCTAssertEqual(choice.executable.lastPathComponent, "Lithtech.exe")
+        XCTAssertEqual(choice.arguments, "-cmdfile avp2cmds.txt")
+        // The launcher is still offered, once, and the engine isn't listed a second time.
+        XCTAssertEqual(programs.filter { $0.executable.path.contains("AvP2") }.map(\.executable.lastPathComponent),
+                       ["Lithtech.exe", "Avp2.exe"])
     }
 
     private func temporaryFolder() throws -> URL {
@@ -291,7 +407,7 @@ final class DecanterCoreTests: XCTestCase {
         try makeShortcut(target: #"C:\GOG Games\Foo\Foo.exe"#)
             .write(to: prefix.appendingPathComponent("drive_c/users/me/Desktop/Foo Deluxe.lnk"))
 
-        let programs = GameInstaller.installedPrograms(prefix: prefix, templatePrefix: template)
+        let programs = GameInstaller.installedPrograms(prefix: prefix, since: .take(prefix: template))
         XCTAssertEqual(programs.map(\.name), ["Foo Deluxe", "Foo"])
         XCTAssertEqual(programs.map(\.executable.lastPathComponent), ["Foo.exe", "config.exe"])
         XCTAssertEqual(programs.map(\.hasShortcut), [true, false])
@@ -299,6 +415,33 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(GameInstaller.obviousChoice(among: programs), programs[0])
         XCTAssertNil(GameInstaller.obviousChoice(among: Array(programs.dropFirst()) + [programs[1]]))
         XCTAssertNil(GameInstaller.resolve(windowsPath: #"C:\GOG Games\Missing\x.exe"#, prefix: prefix))
+    }
+
+    func testInstallingIntoASharedBottleOnlyOffersWhatIsNew() throws {
+        let folder = try temporaryFolder()
+        let fm = FileManager.default
+        let prefix = try makePrefix(in: folder, named: "bottle", files: [
+            "Games/Old/Old.exe", "users/me/Desktop/placeholder",
+        ])
+        let desktop = prefix.appendingPathComponent("drive_c/users/me/Desktop")
+        try makeShortcut(target: #"C:\Games\Old\Old.exe"#).write(to: desktop.appendingPathComponent("Old.lnk"))
+        let before = BottleSnapshot.take(prefix: prefix)
+        XCTAssertTrue(GameInstaller.installedPrograms(prefix: prefix, since: before).isEmpty)
+
+        // A second game arrives beside the first, which the installer could see and patch.
+        let new = prefix.appendingPathComponent("drive_c/Games/New/New.exe")
+        try fm.createDirectory(at: new.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: new)
+        try makeShortcut(target: #"C:\Games\New\New.exe"#).write(to: desktop.appendingPathComponent("New Game.lnk"))
+        let programs = GameInstaller.installedPrograms(prefix: prefix, since: before)
+        XCTAssertEqual(programs.map(\.name), ["New Game"])
+        XCTAssertEqual(GameInstaller.obviousChoice(among: programs)?.executable.lastPathComponent, "New.exe")
+
+        // A patch that rewrites the old game's shortcut offers that game again.
+        let later = BottleSnapshot.take(prefix: prefix)
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(60)],
+                             ofItemAtPath: desktop.appendingPathComponent("Old.lnk").path)
+        XCTAssertEqual(GameInstaller.installedPrograms(prefix: prefix, since: later).map(\.name), ["Old"])
     }
 
     func testInstallBottleGetsItsOwnDesktop() throws {
@@ -316,13 +459,129 @@ final class DecanterCoreTests: XCTestCase {
     func testInstallerPlanRunsOnTheChosenEngine() {
         var withCrossOver = runtime
         withCrossOver.crossoverPath = "/rt/cx"
-        let bottle = UUID()
-        let plan = GameInstaller.plan(for: URL(fileURLWithPath: "/d/setup.exe"), bottleID: bottle, engine: .crossover,
+        let plan = GameInstaller.plan(for: URL(fileURLWithPath: "/d/setup.exe"), prefix: prefix, engine: .crossover,
                                       runtime: withCrossOver, arguments: "/S")
         XCTAssertEqual(plan.executable.path, "/rt/cx/bin/wine")
         XCTAssertEqual(plan.arguments, ["/d/setup.exe", "/S"])
-        XCTAssertEqual(plan.environment["WINEPREFIX"], BottleStore.prefix(bottle).path)
+        XCTAssertEqual(plan.environment["WINEPREFIX"], prefix.path)
         XCTAssertEqual(plan.environment["WINEDLLOVERRIDES"], "winemenubuilder.exe=d")
         XCTAssertEqual(plan.workingDirectory.path, "/d")
+    }
+
+    func testEnvironmentOverridesAndWorkingFolder() throws {
+        var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
+        game.settings.dllOverrides = " dinput8=n,b "
+        game.settings.environment = "# a comment\nDXVK_HUD = fps\n\nnot a variable\n9 LIVES=1\nWINEPREFIX=/elsewhere\nEMPTY=\nPATHS=a=b"
+        let environment = Launcher.plan(game: game, prefix: prefix, runtime: runtime).environment
+        XCTAssertEqual(environment["WINEDLLOVERRIDES"], "dinput8=n,b")
+        XCTAssertEqual(environment["DXVK_HUD"], "fps")
+        XCTAssertEqual(environment["EMPTY"], "")
+        XCTAssertEqual(environment["PATHS"], "a=b")
+        XCTAssertNil(environment["9 LIVES"])
+        XCTAssertEqual(environment["WINEPREFIX"], prefix.path)
+        XCTAssertEqual(Launcher.parseEnvironment(game.settings.environment).map(\.name),
+                       ["DXVK_HUD", "WINEPREFIX", "EMPTY", "PATHS"])
+
+        let folder = try temporaryFolder()
+        game.settings.workingDirectory = folder.path
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).workingDirectory.path, folder.path)
+        // A folder that has gone missing falls back to the program's own.
+        game.settings.workingDirectory = folder.appendingPathComponent("gone").path
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).workingDirectory.path, "/Games/X")
+    }
+
+    func testOldLibraryEntriesStillDecode() throws {
+        let json = #"[{"id":"7E5A8E0C-3F0B-4F0E-9B67-0D0A1C2B3D4E","name":"Old","executablePath":"/g/old.exe","#
+            + #""bottleID":"1E5A8E0C-3F0B-4F0E-9B67-0D0A1C2B3D4E","settings":{"renderer":"wine"}}]"#
+        let game = try XCTUnwrap(JSONDecoder().decode([Game].self, from: Data(json.utf8)).first)
+        XCTAssertFalse(game.isFavorite)
+        XCTAssertEqual(game.playTime, 0)
+        XCTAssertEqual(game.settings.dllOverrides, "")
+        XCTAssertEqual(game.settings.environment, "")
+    }
+
+    func testCoverMatchingOnlyAcceptsTheSameGame() throws {
+        let json = #"{"total":4,"items":[{"type":"app","name":"Portal 2","id":620,"tiny_image":"https://example.com/a.jpg"},"#
+            + #"{"type":"app","name":"Portal™","id":400},{"type":"bundle","name":"Portal","id":7},"#
+            + #"{"type":"app","name":"Grand Theft Auto: San Andreas – The Definitive Edition","id":1547000}]}"#
+        let candidates = try CoverFinder.parse(Data(json.utf8))
+        XCTAssertEqual(candidates.map(\.id), [620, 400, 1547000])
+        XCTAssertEqual(CoverFinder.bestMatch(for: "portal", among: candidates)?.id, 400)
+        XCTAssertEqual(CoverFinder.bestMatch(for: "Portal 2", among: candidates)?.id, 620)
+        XCTAssertEqual(CoverFinder.bestMatch(for: "Grand Theft Auto San Andreas", among: candidates)?.id, 1547000)
+        XCTAssertNil(CoverFinder.bestMatch(for: "Portal 3", among: candidates))
+        XCTAssertNil(CoverFinder.bestMatch(for: "Grand Theft Auto", among: candidates))
+        XCTAssertNil(CoverFinder.bestMatch(for: "™", among: candidates))
+        XCTAssertEqual(candidates[0].imageURLs.last?.absoluteString, "https://example.com/a.jpg")
+        XCTAssertEqual(candidates[0].imageURLs.count, 4)
+    }
+
+    /// A PE whose only section is a resource tree holding one icon group with a 16px and a 32px image.
+    private func makePEWithIcon() -> Data {
+        var data = Data(count: 0x200)
+        func put(_ value: Int, at offset: Int, width: Int) {
+            for index in 0..<width { data[offset + index] = UInt8((value >> (8 * index)) & 0xFF) }
+        }
+        let pe = 0x80, optional = pe + 24, sectionTable = optional + 224
+        put(0x5A4D, at: 0, width: 2)
+        put(pe, at: 0x3C, width: 4)
+        put(0x4550, at: pe, width: 4)
+        put(1, at: pe + 6, width: 2)
+        put(224, at: pe + 20, width: 2)
+        put(0x10B, at: optional, width: 2)
+        put(16, at: optional + 92, width: 4)
+        put(0x1000, at: optional + 96 + 2 * 8, width: 4)  // resource directory RVA
+        put(0x1000, at: sectionTable + 8, width: 4)  // virtual size
+        put(0x1000, at: sectionTable + 12, width: 4)  // virtual address
+        put(0x1000, at: sectionTable + 16, width: 4)  // raw size
+        put(0x200, at: sectionTable + 20, width: 4)  // raw offset
+        data.append(Data(count: 0x1000))
+        let root = 0x200
+        /// A directory at `offset` (relative to the root) with the given (id, target) entries.
+        func directory(_ offset: Int, _ entries: [(Int, Int)]) {
+            put(entries.count, at: root + offset + 14, width: 2)
+            for (index, entry) in entries.enumerated() {
+                put(entry.0, at: root + offset + 16 + index * 8, width: 4)
+                put(entry.1, at: root + offset + 20 + index * 8, width: 4)
+            }
+        }
+        func leaf(_ offset: Int, dataAt: Int, size: Int) {
+            put(0x1000 + dataAt, at: root + offset, width: 4)
+            put(size, at: root + offset + 4, width: 4)
+        }
+        let sub = 0x8000_0000
+        directory(0x000, [(3, sub | 0x040), (14, sub | 0x0C0)])
+        directory(0x040, [(1, sub | 0x060), (2, sub | 0x080)])  // RT_ICON: ids 1 and 2
+        directory(0x060, [(1033, 0x200)])
+        directory(0x080, [(1033, 0x210)])
+        directory(0x0C0, [(1, sub | 0x0E0)])  // RT_GROUP_ICON
+        directory(0x0E0, [(1033, 0x220)])
+        leaf(0x200, dataAt: 0x300, size: 4)
+        leaf(0x210, dataAt: 0x310, size: 6)
+        leaf(0x220, dataAt: 0x400, size: 6 + 28)
+        for (index, byte) in Array("tiny".utf8).enumerated() { data[root + 0x300 + index] = byte }
+        for (index, byte) in Array("bigger".utf8).enumerated() { data[root + 0x310 + index] = byte }
+        let group = root + 0x400
+        put(1, at: group + 2, width: 2)
+        put(2, at: group + 4, width: 2)
+        for (index, icon) in [(size: 16, bytes: 4, id: 1), (size: 32, bytes: 6, id: 2)].enumerated() {
+            let entry = group + 6 + index * 14
+            put(icon.size, at: entry, width: 1)
+            put(icon.size, at: entry + 1, width: 1)
+            put(1, at: entry + 4, width: 2)
+            put(32, at: entry + 6, width: 2)
+            put(icon.bytes, at: entry + 8, width: 4)
+            put(icon.id, at: entry + 12, width: 2)
+        }
+        return data
+    }
+
+    func testIconExtractionPicksTheLargestImage() throws {
+        let icon = try XCTUnwrap(PEImage(data: makePEWithIcon())?.iconFile)
+        XCTAssertEqual(Array(icon.prefix(6)), [0, 0, 1, 0, 1, 0])
+        XCTAssertEqual(Array(icon[6..<8]), [32, 32])
+        XCTAssertEqual(Array(icon[14..<22]), [6, 0, 0, 0, 22, 0, 0, 0])
+        XCTAssertEqual(String(decoding: icon.dropFirst(22), as: UTF8.self), "bigger")
+        XCTAssertNil(PEImage(data: makePE(is64Bit: true, imports: ["d3d11.dll"]))?.iconFile)
     }
 }

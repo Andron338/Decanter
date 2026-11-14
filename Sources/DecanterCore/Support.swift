@@ -23,9 +23,11 @@ public enum Paths {
     public static var downloads: URL { root.appendingPathComponent("Downloads", isDirectory: true) }
     public static var bottles: URL { root.appendingPathComponent("Bottles", isDirectory: true) }
     public static var logs: URL { root.appendingPathComponent("Logs", isDirectory: true) }
+    public static var covers: URL { root.appendingPathComponent("Covers", isDirectory: true) }
     public static var template: URL { root.appendingPathComponent("Template", isDirectory: true) }
     public static var runtimeManifest: URL { root.appendingPathComponent("runtime.json") }
     public static var library: URL { root.appendingPathComponent("library.json") }
+    public static var bottleList: URL { root.appendingPathComponent("bottles.json") }
 
     public static func ensure(_ url: URL) throws {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

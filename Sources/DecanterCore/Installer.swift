@@ -67,7 +67,8 @@ public struct WindowsShortcut: Equatable, Sendable {
         self.init(data: data)
     }
 
-    public init?(data: Data) {
+    /// `preferredLanguages` decides the codepage of the non-Unicode strings old installers write.
+    public init?(data: Data, preferredLanguages: [String] = Locale.preferredLanguages) {
         let bytes = [UInt8](data)
         func u16(_ offset: Int) -> Int? {
             offset >= 0 && offset + 2 <= bytes.count ? Int(bytes[offset]) | Int(bytes[offset + 1]) << 8 : nil
@@ -80,7 +81,7 @@ public struct WindowsShortcut: Equatable, Sendable {
             guard offset >= 0, offset < bytes.count else { return nil }
             let end = bytes[offset...].firstIndex(of: 0) ?? bytes.count
             let raw = Array(bytes[offset..<end])
-            return String(bytes: raw, encoding: .utf8) ?? String(bytes: raw, encoding: .windowsCP1252)
+            return WindowsLanguage.decodeANSI(raw, preferred: preferredLanguages)
         }
         func wide(at offset: Int, maxUnits: Int = 4096) -> String? {
             guard offset >= 0, offset < bytes.count else { return nil }
@@ -128,7 +129,9 @@ public struct WindowsShortcut: Equatable, Sendable {
             let raw = Array(bytes[(offset + 2)..<(offset + 2 + length)])
             strings[flag] = unicode
                 ? String(decoding: stride(from: 0, to: raw.count - 1, by: 2).map { UInt16(raw[$0]) | UInt16(raw[$0 + 1]) << 8 }, as: UTF16.self)
-                : String(bytes: raw, encoding: .utf8) ?? String(bytes: raw, encoding: .windowsCP1252) ?? ""
+                : WindowsLanguage.decodeANSI(raw, preferred: preferredLanguages) ?? ""
+            // Counted strings aren't terminated, but some writers include a NUL (or nothing else) anyway.
+            strings[flag]?.removeAll { $0 == "\0" }
             offset += 2 + length
         }
         workingDirectory = strings[0x10] ?? ""
@@ -154,6 +157,38 @@ public struct WindowsShortcut: Equatable, Sendable {
     }
 }
 
+/// Recognises launcher menus (the window with Play, Options and Uninstall buttons that old games
+/// open first) whose way of starting the real game can be read from the launcher itself.
+public enum LauncherDetector {
+    public struct DirectStart: Equatable, Sendable {
+        public var executable: URL
+        public var arguments: String
+    }
+
+    /// LithTech games (No One Lives Forever, Aliens vs. Predator 2, Tron 2.0…) ship a launcher that
+    /// runs `lithtech.exe -cmdfile <game>cmds.txt` from its own folder. nil for anything else.
+    public static func directStart(for program: URL) -> DirectStart? {
+        let fm = FileManager.default
+        let folder = program.deletingLastPathComponent()
+        guard program.lastPathComponent.lowercased() != "lithtech.exe",
+              let names = try? fm.contentsOfDirectory(atPath: folder.path),
+              let engine = names.first(where: { $0.lowercased() == "lithtech.exe" }),
+              let size = try? program.resourceValues(forKeys: [.fileSizeKey]).fileSize, size < 64 << 20,
+              let data = try? Data(contentsOf: program, options: .mappedIfSafe) else { return nil }
+        let text = data.map { $0 >= 0x41 && $0 <= 0x5A ? $0 | 0x20 : $0 }
+        let marker = Array("lithtech.exe -cmdfile ".utf8)
+        guard let start = text.withUnsafeBytes({ (bytes: UnsafeRawBufferPointer) -> Int? in
+            memmem(bytes.baseAddress, bytes.count, marker, marker.count).map { bytes.baseAddress!.distance(to: $0) }
+        }) else { return nil }
+        // The file name as the launcher spells it, read from the original bytes.
+        let tail = data.dropFirst(start + marker.count).prefix(64)
+        let file = String(decoding: tail.prefix { $0 > 0x20 && $0 < 0x7F && $0 != 0x22 }, as: UTF8.self)
+        guard !file.isEmpty, !file.contains("\\"), !file.contains("/"),
+              let commands = names.first(where: { $0.caseInsensitiveCompare(file) == .orderedSame }) else { return nil }
+        return DirectStart(executable: folder.appendingPathComponent(engine), arguments: "-cmdfile \(commands)")
+    }
+}
+
 /// Something an installer put in a bottle that could be the game.
 public struct InstalledProgram: Identifiable, Equatable, Sendable {
     public var executable: URL
@@ -173,8 +208,41 @@ public struct InstalledProgram: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Runs a Windows installer in a fresh bottle and works out what it installed, the way Lutris's
-/// "install from an executable" does: installer → private prefix → pick the game's program.
+/// What a prefix held before an installer ran, so that only what the installer added is offered
+/// afterwards. Paths are relative, which lets a snapshot of the template stand in for a new prefix.
+public struct BottleSnapshot: Equatable, Sendable {
+    var executables: Set<String> = []
+    /// Shortcut → when it was written. A patch that rewrites a shortcut counts as adding it.
+    var shortcuts: [String: Date] = [:]
+
+    public init() {}
+
+    public static func take(prefix: URL) -> BottleSnapshot {
+        var snapshot = BottleSnapshot()
+        snapshot.executables = BottleStore.executablePaths(prefix: prefix)
+        for link in GameInstaller.shortcuts(in: prefix) {
+            snapshot.shortcuts[relative(link, to: prefix)] = modified(link)
+        }
+        return snapshot
+    }
+
+    func contains(shortcut link: URL, in prefix: URL) -> Bool {
+        guard let known = shortcuts[Self.relative(link, to: prefix)] else { return false }
+        return known == Self.modified(link)
+    }
+
+    private static func modified(_ url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+    }
+
+    private static func relative(_ url: URL, to prefix: URL) -> String {
+        let base = prefix.standardizedFileURL.path, path = url.standardizedFileURL.path
+        return path.hasPrefix(base) ? String(path.dropFirst(base.count)) : path
+    }
+}
+
+/// Runs a Windows installer in a bottle and works out what it installed, the way Lutris's
+/// "install from an executable" does: installer → prefix → pick the game's program.
 public enum GameInstaller {
     /// The renderer whose Wine runs installers for an engine.
     public static func renderer(for engine: Engine) -> Renderer {
@@ -185,17 +253,9 @@ public enum GameInstaller {
         }
     }
 
-    /// A new bottle ready for an installer.
-    public static func prepareBottle(engine: Engine) async throws -> UUID {
-        let id = UUID()
-        try await BottleStore.create(id, engine: engine)
-        isolateDesktop(prefix: BottleStore.prefix(id))
-        return id
-    }
-
     /// Wine links the Windows desktop to the Mac's, so installers would litter the real Desktop with
-    /// `.lnk` files. Give the bottle a desktop of its own, which also lets Decanter read those shortcuts.
-    static func isolateDesktop(prefix: URL) {
+    /// `.lnk` files. Give the prefix a desktop of its own, which also lets Decanter read those shortcuts.
+    public static func isolateDesktop(prefix: URL) {
         let fm = FileManager.default
         let users = prefix.appendingPathComponent("drive_c/users")
         for user in (try? fm.contentsOfDirectory(at: users, includingPropertiesForKeys: nil)) ?? [] {
@@ -207,52 +267,43 @@ public enum GameInstaller {
     }
 
     public static func plan(
-        for file: URL, bottleID: UUID, engine: Engine, runtime: InstalledRuntime, arguments: String = ""
+        for file: URL, prefix: URL, engine: Engine, runtime: InstalledRuntime, arguments: String = ""
     ) -> LaunchPlan {
-        var installer = Game(name: "Installer", executablePath: file.path, bottleID: bottleID)
-        installer.setBottle(bottleID, for: engine)
+        var installer = Game(name: "Installer", executablePath: file.path, bottleID: UUID())
         installer.settings.renderer = renderer(for: engine)
         installer.settings.arguments = arguments
-        var plan = Launcher.plan(game: installer, runtime: runtime)
+        var plan = Launcher.plan(game: installer, prefix: prefix, runtime: runtime)
         // Stops Wine turning the installer's shortcuts into Mac launchers outside the bottle.
         plan.environment["WINEDLLOVERRIDES"] = "winemenubuilder.exe=d"
         return plan
     }
 
-    public static func log(for bottleID: UUID) -> URL {
-        Paths.logs.appendingPathComponent("install-\(bottleID.uuidString).log")
+    public static func log(for prefix: URL) -> URL {
+        Paths.logs.appendingPathComponent("install-\(prefix.deletingLastPathComponent().lastPathComponent).log")
     }
 
-    /// Runs an installer (or patch) and returns once every Windows process in the bottle has exited.
+    /// Runs an installer (or patch) and returns once every Windows process in the prefix has exited.
     public static func run(
-        _ file: URL, bottleID: UUID, engine: Engine, runtime: InstalledRuntime, arguments: String = ""
+        _ file: URL, prefix: URL, engine: Engine, runtime: InstalledRuntime, arguments: String = ""
     ) async throws {
-        let plan = plan(for: file, bottleID: bottleID, engine: engine, runtime: runtime, arguments: arguments)
+        let plan = plan(for: file, prefix: prefix, engine: engine, runtime: runtime, arguments: arguments)
         let result = try await Shell.run(plan.executable, plan.arguments, environment: plan.environment,
                                          cwd: plan.workingDirectory, check: false)
         try? Paths.ensure(Paths.logs)
-        try? result.output.write(to: log(for: bottleID), atomically: true, encoding: .utf8)
+        try? result.output.write(to: log(for: prefix), atomically: true, encoding: .utf8)
         try await Shell.run(runtime.wineserver(for: renderer(for: engine)), ["-w"],
                             environment: plan.environment, check: false)
     }
 
-    /// Ends everything running in the bottle, which makes a pending `run` return.
-    public static func stop(bottleID: UUID, engine: Engine, runtime: InstalledRuntime) async {
-        let env = Launcher.environment(prefix: BottleStore.prefix(bottleID), settings: GameSettings(), engine: engine,
-                                       quiet: true, libraryFallback: runtime.libraryFallback(for: engine))
-        _ = try? await Shell.run(runtime.wineserver(for: renderer(for: engine)), ["-k"], environment: env, check: false)
-    }
-
-    public static func installedPrograms(bottleID: UUID, engine: Engine) -> [InstalledProgram] {
-        installedPrograms(prefix: BottleStore.prefix(bottleID), templatePrefix: BottleStore.templatePrefix(engine))
-    }
-
     /// Programs with a shortcut first (in the order found), then every other new executable.
-    static func installedPrograms(prefix: URL, templatePrefix: URL) -> [InstalledProgram] {
+    /// Only what appeared (or was rewritten) since `snapshot` counts.
+    public static func installedPrograms(prefix: URL, since snapshot: BottleSnapshot) -> [InstalledProgram] {
         var programs: [InstalledProgram] = []
         var seen = Set<String>()
+        var launchers = Set<String>()
         for link in shortcuts(in: prefix) {
-            guard let shortcut = WindowsShortcut(url: link),
+            guard !snapshot.contains(shortcut: link, in: prefix),
+                  let shortcut = WindowsShortcut(url: link),
                   let target = resolve(windowsPath: shortcut.target, prefix: prefix),
                   target.pathExtension.lowercased() == "exe",
                   !GameNaming.isHelperExecutable(target),
@@ -262,9 +313,17 @@ public enum GameInstaller {
                 seen.remove(identity(target))
                 continue
             }
+            // A shortcut to a launcher menu means the game behind it; the launcher stays in the list below.
+            if let direct = LauncherDetector.directStart(for: target), seen.insert(identity(direct.executable)).inserted {
+                launchers.insert(identity(target))
+                programs.append(InstalledProgram(executable: direct.executable, name: label,
+                                                 arguments: direct.arguments, hasShortcut: true))
+                continue
+            }
             programs.append(InstalledProgram(executable: target, name: label, arguments: shortcut.arguments, hasShortcut: true))
         }
-        for url in BottleStore.newExecutables(prefix: prefix, templatePrefix: templatePrefix)
+        seen.subtract(launchers)
+        for url in BottleStore.newExecutables(prefix: prefix, known: snapshot.executables)
         where seen.insert(identity(url)).inserted {
             programs.append(InstalledProgram(executable: url, name: GameNaming.displayName(for: url)))
         }

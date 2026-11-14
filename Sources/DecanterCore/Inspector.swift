@@ -120,6 +120,7 @@ struct PEImage {
     private let sections: [(virtualAddress: Int, virtualSize: Int, rawOffset: Int, rawSize: Int)]
     private let importDirectory: Int
     private let delayImportDirectory: Int
+    private let resourceDirectory: Int
 
     init?(url: URL) {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
@@ -142,6 +143,7 @@ struct PEImage {
             index < directoryCount ? (u32(directories + index * 8) ?? 0) : 0
         }
         importDirectory = directory(1)
+        resourceDirectory = directory(2)
         delayImportDirectory = directory(13)
         isDotNet = directory(14) != 0
         if is64Bit {
@@ -211,6 +213,60 @@ struct PEImage {
             }
         }
         return names
+    }
+
+    /// The program's icon as a single-image `.ico` file: the largest, deepest image of the first icon
+    /// group, which is the one Windows shows for the file.
+    var iconFile: Data? {
+        guard resourceDirectory != 0, let root = fileOffset(rva: resourceDirectory) else { return nil }
+        // Resource tree: type → name → language → data entry. Offsets are relative to the root.
+        func entries(_ table: Int) -> [(id: Int, target: Int)] {
+            guard let named = PEImage.read(data, table + 12, 2), let ids = PEImage.read(data, table + 14, 2) else { return [] }
+            return (0..<min(named + ids, 4096)).compactMap { index in
+                let entry = table + 16 + index * 8
+                guard let id = PEImage.read(data, entry, 4), let target = PEImage.read(data, entry + 4, 4) else { return nil }
+                return (id, target)
+            }
+        }
+        func subdirectory(_ target: Int) -> Int? { target & 0x8000_0000 != 0 ? root + (target & 0x7FFF_FFFF) : nil }
+        /// Follows the first entry at each level down to the resource's bytes.
+        func leaf(_ target: Int) -> Data? {
+            var target = target
+            for _ in 0..<3 {
+                guard let table = subdirectory(target) else { break }
+                guard let first = entries(table).first else { return nil }
+                target = first.target
+            }
+            guard target & 0x8000_0000 == 0, let rva = PEImage.read(data, root + target, 4),
+                  let size = PEImage.read(data, root + target + 4, 4), let offset = fileOffset(rva: rva),
+                  size > 0, offset + size <= data.count else { return nil }
+            return data.subdata(in: (data.startIndex + offset)..<(data.startIndex + offset + size))
+        }
+        let types = entries(root)
+        guard let groups = types.first(where: { $0.id == 14 }).flatMap({ subdirectory($0.target) }),
+              let icons = types.first(where: { $0.id == 3 }).flatMap({ subdirectory($0.target) }),
+              let group = entries(groups).first.flatMap({ leaf($0.target) }),
+              let count = PEImage.read(group, 4, 2) else { return nil }
+
+        // Group entries are 14 bytes: width, height, colours, reserved, planes, bit depth, size, icon id.
+        var best: (header: Data, id: Int, score: Int)?
+        for index in 0..<count {
+            let entry = 6 + index * 14
+            guard let width = PEImage.read(group, entry, 1), let bits = PEImage.read(group, entry + 6, 2),
+                  let id = PEImage.read(group, entry + 12, 2) else { break }
+            let score = (width == 0 ? 256 : width) * 64 + bits
+            if best == nil || score > best!.score {
+                best = (group.subdata(in: (group.startIndex + entry)..<(group.startIndex + entry + 12)), id, score)
+            }
+        }
+        guard let best, let image = entries(icons).first(where: { $0.id == best.id }).flatMap({ leaf($0.target) })
+        else { return nil }
+        // .ico: 6-byte header, then one 16-byte entry (the group's first 12 bytes plus the data offset).
+        var file = Data([0, 0, 1, 0, 1, 0])
+        file.append(best.header)
+        file.append(contentsOf: [22, 0, 0, 0])
+        file.append(image)
+        return file
     }
 
     private static func isNameByte(_ byte: UInt8) -> Bool {

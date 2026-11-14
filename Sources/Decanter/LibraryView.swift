@@ -2,27 +2,205 @@ import DecanterCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum LibraryFilter: Hashable {
+    case all, recent, favorites, running
+    case renderer(Renderer)
+    case bottle(UUID)
+}
+
+enum LibrarySort: String, CaseIterable, Identifiable {
+    case name, lastPlayed, playTime, added
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .name: return "Name"
+        case .lastPlayed: return "Last Played"
+        case .playTime: return "Play Time"
+        case .added: return "Date Added"
+        }
+    }
+}
+
+enum LibraryLayout: String {
+    case grid, list
+}
+
 struct LibraryView: View {
     @Environment(AppModel.self) private var model
     @State private var importing = false
     /// The file chooser was opened from "Install from Installer…", so whatever is picked is run as one.
     @State private var importingInstaller = false
+    /// The bottle "Install into This Bottle…" was chosen on; nil offers the default one.
+    @State private var installing: UUID?
     @State private var dropTargeted = false
+    @State private var filter: LibraryFilter? = .all
+    @State private var selection: Game.ID?
+    @State private var search = ""
+    @AppStorage("libraryLayout") private var layout = LibraryLayout.grid
+    @AppStorage("librarySort") private var sort = LibrarySort.name
+    @AppStorage("librarySortReversed") private var sortReversed = false
+    @AppStorage("coverSize") private var coverSize = 160.0
 
     private let windowsTypes: [UTType] = [.exe, UTType(filenameExtension: "msi") ?? .data]
 
     var body: some View {
         @Bindable var model = model
-        ZStack {
+        NavigationSplitView {
+            sidebar
+        } detail: {
+            detail
+        }
+        .navigationSubtitle(model.runtime?.summary ?? "")
+        .fileImporter(isPresented: $importing, allowedContentTypes: windowsTypes, allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            if importingInstaller, let first = urls.first {
+                model.requestInstall(first, bottleID: installing)
+            } else {
+                model.add(urls)
+            }
+        }
+        .sheet(item: $model.installRequest) { InstallSheet(request: $0) }
+        .sheet(item: $model.editing) { GameSettingsSheet(game: $0) }
+        .sheet(item: $model.installerResult) { InstallerResultSheet(result: $0) }
+        .sheet(item: $model.coverSearch) { CoverSearchSheet(game: $0) }
+        .sheet(isPresented: $model.managingBottles) { BottlesSheet(initial: selectedBottleID) }
+        .confirmationDialog(
+            "Remove \(model.pendingRemoval?.name ?? "this game")?",
+            isPresented: Binding(get: { model.pendingRemoval != nil }, set: { if !$0 { model.pendingRemoval = nil } }),
+            presenting: model.pendingRemoval
+        ) { game in
+            if model.isOnlyGame(inItsBottle: game) {
+                Button("Remove and Delete Its Bottle", role: .destructive) { remove(game, deletingBottle: true) }
+                Button("Remove from Library Only") { remove(game, deletingBottle: false) }
+            } else {
+                Button("Remove", role: .destructive) { remove(game, deletingBottle: false) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { game in
+            let bottle = model.bottle(game.bottleID)?.displayName ?? "its bottle"
+            Text(model.isOnlyGame(inItsBottle: game)
+                 ? "It is the only game in the bottle “\(bottle)”. Deleting the bottle also deletes anything installed in it and saves kept there. Files outside Decanter aren't touched."
+                 : "The game leaves your library. Anything it installed stays in the bottle “\(bottle)”, which other games may rely on. Files outside Decanter aren't touched.")
+        }
+    }
+
+    private func remove(_ game: Game, deletingBottle: Bool) {
+        if selection == game.id { selection = nil }
+        model.remove(game, deletingBottle: deletingBottle)
+    }
+
+    /// The bottle the sidebar is showing, which is where the bottle manager opens.
+    private var selectedBottleID: UUID? {
+        if case .bottle(let id) = filter { return id }
+        return nil
+    }
+
+    // MARK: Sidebar
+
+    private var sidebar: some View {
+        List(selection: $filter) {
+            Section("Library") {
+                sidebarRow(.all, "Games", "gamecontroller")
+                sidebarRow(.recent, "Recent", "clock")
+                sidebarRow(.favorites, "Favorites", "star")
+                if !model.running.isEmpty {
+                    sidebarRow(.running, "Running", "play.circle")
+                }
+            }
+            let renderers = Renderer.allCases.filter { renderer in
+                model.games.contains { $0.settings.renderer == renderer }
+            }
+            if !renderers.isEmpty {
+                Section("Renderers") {
+                    ForEach(renderers) { sidebarRow(.renderer($0), $0.shortName, $0.symbol) }
+                }
+            }
+            if !model.bottles.isEmpty {
+                Section("Bottles") {
+                    ForEach(model.bottles) { bottle in
+                        sidebarRow(.bottle(bottle.id), bottle.displayName,
+                                   bottle.id == model.defaultBottleID ? "wineglass.fill" : "wineglass")
+                            .contextMenu {
+                                Button("Install into This Bottle…") { chooseFile(installer: true, bottle: bottle.id) }
+                                if bottle.id != model.defaultBottleID {
+                                    Button("Make Default") { model.setDefaultBottle(bottle.id) }
+                                }
+                                Divider()
+                                Button("Manage Bottles…") {
+                                    filter = .bottle(bottle.id)
+                                    model.managingBottles = true
+                                }
+                            }
+                    }
+                }
+            }
+        }
+        .onChange(of: model.bottles.map(\.id)) { _, ids in
+            if let id = selectedBottleID, !ids.contains(id) { filter = .all }
+        }
+        .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 260)
+    }
+
+    private func sidebarRow(_ filter: LibraryFilter, _ title: String, _ symbol: String) -> some View {
+        Label(title, systemImage: symbol)
+            .badge(games(in: filter).count)
+            .tag(filter)
+    }
+
+    // MARK: Filtering and sorting
+
+    private func games(in filter: LibraryFilter) -> [Game] {
+        switch filter {
+        case .all: return model.games
+        case .recent: return model.games.filter { $0.lastPlayed != nil }
+        case .favorites: return model.games.filter(\.isFavorite)
+        case .running: return model.games.filter { model.running.contains($0.id) }
+        case .renderer(let renderer): return model.games.filter { $0.settings.renderer == renderer }
+        case .bottle(let id): return model.games.filter { $0.bottleID == id }
+        }
+    }
+
+    private var visibleGames: [Game] {
+        let filter = filter ?? .all
+        var games = games(in: filter)
+        let term = search.trimmingCharacters(in: .whitespaces)
+        if !term.isEmpty { games = games.filter { $0.name.localizedCaseInsensitiveContains(term) } }
+        // "Recent" is only useful newest-first, whatever the library is sorted by.
+        let sort = filter == .recent ? LibrarySort.lastPlayed : sort
+        let byName: (Game, Game) -> Bool = { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        switch sort {
+        case .name: games.sort(by: byName)
+        case .lastPlayed: games.sort { ($0.lastPlayed ?? .distantPast, $1.name) > ($1.lastPlayed ?? .distantPast, $0.name) }
+        case .playTime: games.sort { ($0.playTime, $1.name) > ($1.playTime, $0.name) }
+        case .added: games.sort { ($0.added ?? .distantPast, $1.name) > ($1.added ?? .distantPast, $0.name) }
+        }
+        return sortReversed && filter != .recent ? games.reversed() : games
+    }
+
+    private var selectedGame: Game? {
+        model.games.first { $0.id == selection }
+    }
+
+    // MARK: Detail
+
+    private var detail: some View {
+        let games = visibleGames
+        return ZStack {
             if model.games.isEmpty {
                 emptyState
-            } else {
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 220), spacing: 18)], spacing: 18) {
-                        ForEach(model.games) { GameCard(game: $0) }
-                    }
-                    .padding(22)
+            } else if games.isEmpty {
+                if search.trimmingCharacters(in: .whitespaces).isEmpty {
+                    ContentUnavailableView("Nothing here yet", systemImage: "square.grid.2x2",
+                                           description: Text("No games match this part of your library."))
+                } else {
+                    ContentUnavailableView.search(text: search)
                 }
+            } else if layout == .grid {
+                grid(games)
+            } else {
+                table(games)
             }
             if dropTargeted {
                 RoundedRectangle(cornerRadius: 14)
@@ -32,26 +210,7 @@ struct LibraryView: View {
                     .allowsHitTesting(false)
             }
             if let message = model.busyMessage {
-                VStack(spacing: 12) {
-                    ProgressView()
-                    Text(message).multilineTextAlignment(.center).frame(maxWidth: 320)
-                    if let active = model.activeInstall {
-                        HStack {
-                            if active.isNewGame {
-                                Button("Cancel Install", role: .destructive) { model.cancelInstall() }
-                                    .help("Stop the installer and throw away what it installed so far")
-                                Button("Installer Is Done") { model.finishInstall() }
-                                    .help("Use this if the installer has finished but left a launcher or the game running")
-                            } else {
-                                Button("Stop") { model.finishInstall() }
-                            }
-                        }
-                        .padding(.top, 4)
-                    }
-                }
-                .padding(28)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-                .shadow(radius: 20)
+                busyOverlay(message)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -62,36 +221,145 @@ struct LibraryView: View {
         } isTargeted: {
             dropTargeted = $0
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button("Add Game…") { chooseFile(installer: false) }
-                        .keyboardShortcut("o")
-                    Button("Install from Installer…") { chooseFile(installer: true) }
-                        .keyboardShortcut("i")
-                } label: {
-                    Label("Add Game", systemImage: "plus")
-                } primaryAction: {
-                    chooseFile(installer: false)
-                }
-                .help("Add a Windows game, or install one from its installer")
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !model.games.isEmpty {
+                ActionBar(game: selectedGame, gameCount: games.count,
+                          coverSize: layout == .grid ? $coverSize : nil)
             }
         }
-        .navigationSubtitle(model.runtime?.summary ?? "")
-        .fileImporter(isPresented: $importing, allowedContentTypes: windowsTypes, allowsMultipleSelection: true) { result in
-            guard case .success(let urls) = result else { return }
-            if importingInstaller, let first = urls.first {
-                model.requestInstall(first)
-            } else {
-                model.add(urls)
-            }
+        .searchable(text: $search, prompt: "Search games")
+        .toolbar { toolbar }
+        .onChange(of: games.map(\.id)) { _, visible in
+            // A game that is filtered out or removed can't stay selected: the action bar would act on
+            // something no longer on screen.
+            if let selection, !visible.contains(selection) { self.selection = nil }
         }
-        .sheet(item: $model.installRequest) { InstallSheet(request: $0) }
-        .sheet(item: $model.editing) { GameSettingsSheet(game: $0) }
-        .sheet(item: $model.installerResult) { InstallerResultSheet(result: $0) }
     }
 
-    private func chooseFile(installer: Bool) {
+    private func grid(_ games: [Game]) -> some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: coverSize, maximum: coverSize * 1.35), spacing: 20)],
+                      spacing: 22) {
+                ForEach(games) { game in
+                    GameCard(game: game, isSelected: selection == game.id)
+                        .simultaneousGesture(TapGesture(count: 2).onEnded { model.play(game) })
+                        .simultaneousGesture(TapGesture().onEnded { selection = game.id })
+                }
+            }
+            .padding(22)
+            .frame(maxWidth: .infinity, minHeight: 200, alignment: .topLeading)
+            .background {
+                // Clicking the empty space between covers clears the selection.
+                Color.clear.contentShape(Rectangle()).onTapGesture { selection = nil }
+            }
+        }
+    }
+
+    private func table(_ games: [Game]) -> some View {
+        Table(games, selection: $selection) {
+            TableColumn("Name") { game in
+                HStack(spacing: 10) {
+                    CoverArt(game: game, cornerRadius: 3).frame(width: 24, height: 36)
+                    Text(game.name)
+                    if game.isFavorite {
+                        Image(systemName: "star.fill").font(.caption).foregroundStyle(.yellow)
+                    }
+                    if model.running.contains(game.id) {
+                        Text("Running").font(.caption).foregroundStyle(.green)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            TableColumn("Renderer") { game in
+                Text(game.settings.renderer.shortName).foregroundStyle(.secondary)
+            }
+            .width(min: 80, ideal: 100, max: 140)
+            TableColumn("Last Played") { game in
+                Text(game.lastPlayed?.formatted(.relative(presentation: .named)) ?? "Never")
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 100, ideal: 130, max: 180)
+            TableColumn("Play Time") { game in
+                Text(game.playTimeText ?? "—").foregroundStyle(.secondary).monospacedDigit()
+            }
+            .width(min: 80, ideal: 100, max: 140)
+        }
+        .contextMenu(forSelectionType: Game.ID.self) { ids in
+            if let game = model.games.first(where: { ids.contains($0.id) }) {
+                GameMenu(game: game)
+            }
+        } primaryAction: { ids in
+            if let game = model.games.first(where: { ids.contains($0.id) }) { model.play(game) }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem {
+            Picker("View", selection: $layout) {
+                Label("Covers", systemImage: "square.grid.2x2").tag(LibraryLayout.grid)
+                Label("List", systemImage: "list.bullet").tag(LibraryLayout.list)
+            }
+            .pickerStyle(.segmented)
+            .help("Show the library as covers or as a list")
+        }
+        ToolbarItem {
+            Menu {
+                Picker("Sort By", selection: $sort) {
+                    ForEach(LibrarySort.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.inline)
+                Toggle("Reverse Order", isOn: $sortReversed)
+            } label: {
+                Label("Sort", systemImage: "arrow.up.arrow.down")
+            }
+            .help("Change how the library is sorted")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Button("Add Game…") { chooseFile(installer: false) }
+                    .keyboardShortcut("o")
+                Button("Install from Installer…") { chooseFile(installer: true) }
+                    .keyboardShortcut("i")
+                Divider()
+                Button("Manage Bottles…") { model.managingBottles = true }
+                    .keyboardShortcut("b")
+            } label: {
+                Label("Add Game", systemImage: "plus")
+            } primaryAction: {
+                chooseFile(installer: false)
+            }
+            .help("Add a Windows game, or install one from its installer")
+        }
+    }
+
+    private func busyOverlay(_ message: String) -> some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text(message).multilineTextAlignment(.center).frame(maxWidth: 320)
+            if let active = model.activeInstall {
+                HStack {
+                    if active.isNewGame {
+                        Button("Cancel Install", role: .destructive) { model.cancelInstall() }
+                            .help(active.discardsOnCancel
+                                  ? "Stop the installer and throw away the bottle made for it"
+                                  : "Stop the installer. What it already put in the bottle stays there")
+                        Button("Installer Is Done") { model.finishInstall() }
+                            .help("Use this if the installer has finished but left a launcher or the game running")
+                    } else {
+                        Button("Stop") { model.finishInstall() }
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+        .padding(28)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .shadow(radius: 20)
+    }
+
+    private func chooseFile(installer: Bool, bottle: UUID? = nil) {
+        installing = bottle
         importingInstaller = installer
         importing = true
     }
@@ -114,324 +382,81 @@ struct LibraryView: View {
     }
 }
 
-struct GameCard: View {
+/// The strip along the bottom of the library: the selected game with its main actions, and the cover
+/// size slider when covers are showing.
+struct ActionBar: View {
     @Environment(AppModel.self) private var model
-    let game: Game
-    @State private var hovering = false
-
-    private var isRunning: Bool { model.running.contains(game.id) }
+    let game: Game?
+    let gameCount: Int
+    /// nil in the list layout, which has no covers to resize.
+    let coverSize: Binding<Double>?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12).fill(gradient)
-                Text(initials)
-                    .font(.system(size: 44, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.9))
-                if hovering || isRunning {
-                    RoundedRectangle(cornerRadius: 12).fill(.black.opacity(0.35))
-                    Button {
-                        isRunning ? model.stop(game) : model.play(game)
-                    } label: {
-                        Image(systemName: isRunning ? "stop.fill" : "play.fill")
-                            .font(.system(size: 26))
-                            .foregroundStyle(.white)
-                            .frame(width: 60, height: 60)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(isRunning ? "Stop" : "Play")
+        HStack(spacing: 12) {
+            if let game {
+                let isRunning = model.running.contains(game.id)
+                CoverArt(game: game, cornerRadius: 4).frame(width: 30, height: 45)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(game.name).font(.headline).lineLimit(1)
+                    Text(details(game, isRunning: isRunning))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
-            }
-            .aspectRatio(4 / 3, contentMode: .fit)
-
-            Text(game.name).font(.headline).lineLimit(1)
-            Text(isRunning ? "Running" : lastPlayedText)
-                .font(.caption)
-                .foregroundStyle(isRunning ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
-        }
-        .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { model.play(game) }
-        .contextMenu {
-            Button(isRunning ? "Stop" : "Play") { isRunning ? model.stop(game) : model.play(game) }
-            Button("Settings…") { model.editing = game }
-            Divider()
-            Button("Show Log") { model.showLog(game) }
-            Button("Open C: Drive") { model.openDriveC(game) }
-            Button("Wine Configuration") { model.runTool("winecfg", in: game) }
-            Button("Run Patch or Installer…") { model.runInstaller(in: game) }
-            Divider()
-            Button("Remove", role: .destructive) { model.remove(game) }
-        }
-    }
-
-    private var lastPlayedText: String {
-        guard let date = game.lastPlayed else { return "Never played" }
-        return "Played " + date.formatted(.relative(presentation: .named))
-    }
-
-    private var initials: String {
-        let words = game.name.split(separator: " ").filter { $0.first?.isLetter == true || $0.first?.isNumber == true }
-        return words.prefix(2).compactMap { $0.first.map(String.init) }.joined().uppercased()
-    }
-
-    private var gradient: LinearGradient {
-        // Stable per-name hue (String.hashValue changes every launch).
-        let seed = game.name.unicodeScalars.reduce(UInt32(7)) { ($0 &* 31) &+ $1.value }
-        let hue = Double(seed % 360) / 360
-        return LinearGradient(
-            colors: [Color(hue: hue, saturation: 0.65, brightness: 0.75),
-                     Color(hue: (hue + 0.08).truncatingRemainder(dividingBy: 1), saturation: 0.8, brightness: 0.45)],
-            startPoint: .topLeading, endPoint: .bottomTrailing)
-    }
-}
-
-struct GameSettingsSheet: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-    @State var game: Game
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section {
-                    TextField("Name", text: $game.name)
-                    LabeledContent("Program") {
-                        Text(game.executablePath).font(.caption).foregroundStyle(.secondary)
-                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
-                    }
+                .layoutPriority(1)
+                Spacer(minLength: 12)
+                Button {
+                    isRunning ? model.stop(game) : model.play(game)
+                } label: {
+                    Label(isRunning ? "Stop" : "Play", systemImage: isRunning ? "stop.fill" : "play.fill")
+                        .frame(minWidth: 64)
                 }
-                Section {
-                    if let requirements = game.requirements {
-                        LabeledContent("Detected") {
-                            Text(requirements.summary).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
-                        }
-                        if let advice = rendererAdvice(requirements) {
-                            Label(advice, systemImage: "exclamationmark.triangle")
-                                .font(.caption).foregroundStyle(.orange)
-                        }
-                    }
-                    Picker("Renderer", selection: $game.settings.renderer) {
-                        Text("Metal — DXMT (DirectX 10/11)").tag(Renderer.metal)
-                        Text("D3DMetal — Apple (DirectX 11/12)").tag(Renderer.d3dmetal)
-                        Text("CrossOver engine (DirectX 9 and older, 32-bit)").tag(Renderer.crossover)
-                        Text("Wine 11 built-in").tag(Renderer.wine)
-                    }
-                    if game.settings.renderer == .crossover {
-                        Text(model.runtime?.hasCrossOver == true
-                             ? "Runs on CrossOver's Wine 9 in its own Windows environment, separate from the other renderers."
-                             : "Runs on CrossOver's Wine 9. Decanter downloads it (about 165 MB) the first time you press Play.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if game.settings.renderer == .d3dmetal {
-                        if model.runtime?.hasD3DMetal == true {
-                            Toggle("Ray tracing (DXR)", isOn: $game.settings.rayTracing)
-                            Toggle("DLSS through MetalFX", isOn: $game.settings.metalFX)
-                            Toggle("Report AVX support to the game", isOn: $game.settings.advertiseAVX)
-                            Text("D3DMetal runs on Apple's own Wine with a separate Windows environment, so saves and anything an installer set up don't carry over from the other renderers.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            D3DMetalInstallRow()
-                        }
-                    }
-                } header: {
-                    Text("Graphics")
-                } footer: {
-                    Text("If a game shows a black screen or quits at launch, try another renderer.")
+                .buttonStyle(.borderedProminent)
+                .tint(isRunning ? .red : .accentColor)
+                .controlSize(.large)
+                Button {
+                    model.editing = game
+                } label: {
+                    Image(systemName: "gearshape").frame(width: 18, height: 18)
                 }
-                Section("Compatibility") {
-                    Toggle(isOn: $game.settings.virtualDesktop) {
-                        Text("Run in a fixed-size window")
-                        Text("Fixes older games that crash when switching to fullscreen.")
-                    }
-                    if game.settings.virtualDesktop {
-                        Picker("Window size", selection: $game.settings.virtualDesktopSize) {
-                            ForEach(["1024x768", "1280x720", "1440x900", "1920x1080", "2560x1440"], id: \.self) { Text($0) }
-                        }
-                    }
+                .accessibilityLabel("Configure")
+                .controlSize(.large)
+                .help("Configure \(game.name)")
+                Menu {
+                    GameMenu(game: game)
+                } label: {
+                    Image(systemName: "ellipsis").frame(width: 18, height: 18)
                 }
-                Section("Extras") {
-                    Toggle("High-resolution (Retina) rendering", isOn: $game.settings.retina)
-                    Toggle("Fast synchronisation", isOn: $game.settings.fastSync)
-                    Toggle("Show Metal performance overlay", isOn: $game.settings.performanceHUD)
-                    TextField("Launch arguments", text: $game.settings.arguments, prompt: Text("e.g. -windowed"))
-                }
-            }
-            .formStyle(.grouped)
-
-            HStack {
+                .accessibilityLabel("More actions")
+                .menuStyle(.button)
+                .buttonStyle(.bordered)
+                .menuIndicator(.hidden)
+                .controlSize(.large)
+                .fixedSize()
+                .help("More actions")
+            } else {
+                Text(gameCount == 1 ? "1 game" : "\(gameCount) games")
+                    .font(.callout).foregroundStyle(.secondary)
                 Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Save") {
-                    model.update(game)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
             }
-            .padding()
+            if let coverSize {
+                HStack(spacing: 6) {
+                    Image(systemName: "square.grid.3x3").font(.caption)
+                    Slider(value: coverSize, in: 110...260).frame(width: 110).controlSize(.small)
+                    Image(systemName: "square.grid.2x2")
+                }
+                .foregroundStyle(.secondary)
+                .help("Cover size")
+                .padding(.leading, 6)
+            }
         }
-        .frame(width: 540, height: 680)
+        .padding(.horizontal, 16)
+        .frame(height: 62)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
     }
 
-    /// A warning when the chosen renderer can't handle what the game was detected to use.
-    private func rendererAdvice(_ requirements: GameRequirements) -> String? {
-        guard let top = requirements.directX.last else { return nil }
-        let hasModern = requirements.directX.contains { $0 >= 10 }
-        switch game.settings.renderer {
-        case .metal where top == 12 && !requirements.directX.contains(11) && !requirements.directX.contains(10):
-            return "This game uses DirectX 12, which DXMT can't translate. Choose D3DMetal."
-        case .metal where !hasModern, .d3dmetal where !hasModern:
-            return "This game uses DirectX \(top <= 7 ? "7 or older" : String(top)), which this renderer doesn't cover. The CrossOver engine is the best choice for it."
-        case .d3dmetal where !requirements.is64Bit:
-            return "D3DMetal is built for 64-bit games; this one is 32-bit and may not start."
-        default:
-            return nil
-        }
-    }
-}
-
-/// Shown when D3DMetal is picked but not downloaded yet. Downloading requires accepting Apple's licence.
-struct D3DMetalInstallRow: View {
-    @Environment(AppModel.self) private var model
-    @State private var confirming = false
-
-    var body: some View {
-        switch model.d3dMetalInstall {
-        case .working(let stage, let fraction):
-            VStack(alignment: .leading, spacing: 6) {
-                if let fraction { ProgressView(value: fraction) } else { ProgressView().controlSize(.small) }
-                Text(stage).font(.caption).foregroundStyle(.secondary)
-            }
-        default:
-            VStack(alignment: .leading, spacing: 6) {
-                if case .failed(let message) = model.d3dMetalInstall {
-                    Text(message).font(.caption).foregroundStyle(.red)
-                }
-                HStack {
-                    Text("D3DMetal isn't installed yet. Until it is, this game uses the Metal (DXMT) renderer.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Download…") { confirming = true }
-                }
-            }
-            .confirmationDialog("Download Apple's D3DMetal?", isPresented: $confirming) {
-                Button("Agree and Download (about 230 MB)") { model.installD3DMetal() }
-                Button("Read Apple's Licence") { NSWorkspace.shared.open(RuntimeManager.d3dMetalLicenseURL) }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("D3DMetal is Apple's proprietary DirectX 11/12 translator from the Game Porting Toolkit. It isn't open source and is covered by Apple's licence, which you accept by downloading. Decanter fetches the community binary build of the toolkit.")
-            }
-        }
-    }
-}
-
-/// Confirms an explicit "Install from Installer…" and lets the user pick the engine it runs on.
-struct InstallSheet: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-    let request: InstallRequest
-    @State private var engine = Engine.wine
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Install a game").font(.title2.bold())
-            VStack(alignment: .leading, spacing: 2) {
-                Text(request.installer.lastPathComponent).lineLimit(1).truncationMode(.middle)
-                Text(request.kind?.displayName ?? "Not a known installer type. Decanter will run it as one anyway.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Picker("Install for", selection: $engine) {
-                Text("Modern games (DirectX 10 and newer)").tag(Engine.wine)
-                Text("Older games (DirectX 9 and earlier, 32-bit)").tag(Engine.crossover)
-                if model.runtime?.hasD3DMetal == true {
-                    Text("DirectX 12 games (D3DMetal)").tag(Engine.gptk)
-                }
-            }
-            Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Text("The installer opens in its own window. Go through it as you would on Windows, and leave the install location as it is.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Install") {
-                    model.install(request.installer, engine: engine)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(20)
-        .frame(width: 480)
-    }
-
-    private var note: String {
-        switch engine {
-        case .wine:
-            return "Runs on Wine 11. If the game turns out to be an older one, Decanter still switches its renderer for you."
-        case .crossover:
-            return model.runtime?.hasCrossOver == true
-                ? "Runs on CrossOver's Wine 9, which also suits installers that crash on Wine 11."
-                : "Runs on CrossOver's Wine 9, which also suits installers that crash on Wine 11. Decanter downloads it first (about 165 MB)."
-        case .gptk:
-            return "Runs on Apple's Wine, so the game is installed where D3DMetal can use it."
-        }
-    }
-}
-
-struct InstallerResultSheet: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-    let result: InstallerResult
-    @State private var programs: [InstalledProgram] = []
-    @State private var selection: Set<String> = []
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(programs.isEmpty ? "Couldn't find the game" : "Which one is the game?").font(.title2.bold())
-            Text(programs.isEmpty
-                 ? "The installer finished, but Decanter found nothing new. If it installed somewhere unusual, choose the game's program yourself. If you cancelled it, discard this install."
-                 : "The installer added several programs. Pick the ones you want in your library.")
-                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            List(programs, selection: $selection) { program in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(program.name)
-                        Text(program.executable.deletingLastPathComponent().lastPathComponent + "\\" + program.executable.lastPathComponent)
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if program.hasShortcut {
-                        Image(systemName: "star.fill").foregroundStyle(.yellow)
-                            .help("The installer made a shortcut for this one")
-                    }
-                }
-            }
-            .frame(minHeight: 220)
-            HStack {
-                Button("Choose Another…") {
-                    guard let program = model.browseInstalled(result) else { return }
-                    if !programs.contains(where: { $0.id == program.id }) { programs.append(program) }
-                    selection.insert(program.id)
-                }
-                Spacer()
-                Button("Discard Install", role: .destructive) {
-                    model.discardInstallerResult(result)
-                    dismiss()
-                }
-                Button("Add to Library") {
-                    model.addInstalled(programs.filter { selection.contains($0.id) }, from: result)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(selection.isEmpty)
-            }
-        }
-        .padding(20)
-        .frame(width: 520)
-        .interactiveDismissDisabled()
-        .onAppear {
-            programs = result.programs
-            selection = Set(result.programs.filter(\.hasShortcut).map(\.id))
-        }
+    private func details(_ game: Game, isRunning: Bool) -> String {
+        var parts = [game.settings.renderer.shortName, isRunning ? "Running" : game.lastPlayedText]
+        if let playTime = game.playTimeText { parts.append(playTime + " played") }
+        return parts.joined(separator: " · ")
     }
 }

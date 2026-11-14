@@ -14,29 +14,49 @@ struct InstallRequest: Identifiable {
     let id = UUID()
     let installer: URL
     let kind: InstallerKind?
+    /// The bottle to offer first; the default one when nil.
+    var bottleID: UUID?
+}
+
+/// Where an installer should run.
+enum BottleChoice: Hashable {
+    case existing(UUID)
+    case new(name: String)
 }
 
 /// What an installer left behind, when Decanter needs the user to say which program is the game.
 struct InstallerResult: Identifiable {
     let id = UUID()
     let bottleID: UUID
+    let bottleName: String
+    let prefix: URL
     let engine: Engine
+    /// The bottle was made for this install, so discarding the install deletes it.
+    let createdBottle: Bool
     var programs: [InstalledProgram]
 }
 
 /// An installer that is running right now.
 struct ActiveInstall: Equatable {
-    let bottleID: UUID
+    let prefix: URL
     let engine: Engine
-    /// false when it runs inside an existing game's bottle (a patch, DLC or missing component).
+    /// false when it runs for an existing game (a patch, DLC or missing component).
     let isNewGame: Bool
+    /// Cancelling throws the whole bottle away, because it was made for this install.
+    var discardsOnCancel = false
 }
 
 @MainActor
 @Observable
 final class AppModel {
     var runtime: InstalledRuntime? = RuntimeManager.load()
-    var games: [Game] = AppModel.loadLibrary()
+    var games: [Game]
+    private(set) var bottles: [Bottle]
+    /// Where new games and installers go unless the user picks another bottle.
+    private(set) var defaultBottleID: UUID?
+    var managingBottles = false
+    /// Prefixes being cloned right now, so two launches don't each make one for the same bottle.
+    @ObservationIgnored private var prefixTasks: [String: Task<UUID, Error>] = [:]
     var setupState: SetupState = .needed
     var busyMessage: String?
     var errorMessage: String?
@@ -48,6 +68,28 @@ final class AppModel {
     var editing: Game?
     /// nil when idle; progress or failure of the optional D3DMetal download.
     var d3dMetalInstall: SetupState?
+    /// A game waiting for the user to confirm its removal.
+    var pendingRemoval: Game?
+    /// A game whose cover the user is picking from online results.
+    var coverSearch: Game?
+    /// Cover images by game. Games without one fall back to `icons`, then to a generated placeholder.
+    private(set) var covers: [UUID: NSImage] = [:]
+    /// The icon embedded in each game's program.
+    private(set) var icons: [UUID: NSImage] = [:]
+
+    static var downloadsCoversAutomatically: Bool {
+        UserDefaults.standard.object(forKey: "autoCovers") as? Bool ?? true
+    }
+
+    init() {
+        // Before the library: this is what moves older libraries' bottles into the bottle list.
+        let list = BottleStore.loadAdopting()
+        bottles = list.bottles
+        defaultBottleID = list.defaultID
+        games = AppModel.loadLibrary()
+        for game in games { loadArtwork(for: game) }
+        fetchMissingCovers()
+    }
 
     /// Games added before detection existed get inspected once; their renderer choice is left alone
     /// unless it was still the untouched default.
@@ -104,7 +146,7 @@ final class AppModel {
     func add(_ url: URL) {
         guard runtime != nil, isWindowsProgram(url) else { return }
         if GameNaming.looksLikeInstaller(url) {
-            install(url, engine: .wine)
+            install(url)
         } else {
             addExecutable(url)
         }
@@ -116,37 +158,37 @@ final class AppModel {
         return false
     }
 
-    /// Adds a game that is already installed (or portable) somewhere on disk.
-    private func addExecutable(_ url: URL) {
-        guard busyMessage == nil else { return }
-        busyMessage = "Preparing a fresh Windows environment…"
-        Task {
-            defer { busyMessage = nil }
-            do {
-                let bottleID = UUID()
-                try await BottleStore.create(bottleID)
-                var game = Game(name: GameNaming.displayName(for: url), executablePath: url.path, bottleID: bottleID)
-                game.inspect(chooseRenderer: true)
-                games.append(game)
-                LibraryStore.save(games)
-            } catch {
-                errorMessage = error.localizedDescription
-            }
+    /// Adds a game that is already installed (or portable) somewhere on disk. Its bottle's prefix is
+    /// made the first time it is played.
+    private func addExecutable(_ url: URL, bottleID: UUID? = nil, engine: Engine? = nil) {
+        var game = Game(name: GameNaming.displayName(for: url), executablePath: url.path,
+                        bottleID: bottleID ?? sharedBottle().id)
+        game.inspect(chooseRenderer: true)
+        // A program picked out of a prefix belongs to that engine: its registry entries exist nowhere else.
+        if let engine, runtime?.engine(for: game.settings.renderer) != engine {
+            game.settings.renderer = GameInstaller.renderer(for: engine)
         }
+        games.append(game)
+        LibraryStore.save(games)
+        loadArtwork(for: game)
+        fetchMissingCovers()
     }
 
     // MARK: Installing
 
-    /// Treats the file as an installer no matter what it's called, after asking which engine to use.
-    func requestInstall(_ url: URL) {
+    /// Treats the file as an installer no matter what it's called, after asking where to run it.
+    func requestInstall(_ url: URL, bottleID: UUID? = nil) {
         guard runtime != nil, isWindowsProgram(url) else { return }
-        installRequest = InstallRequest(installer: url, kind: InstallerDetector.kind(of: url))
+        installRequest = InstallRequest(installer: url, kind: InstallerDetector.kind(of: url),
+                                        bottleID: bottleID ?? sharedBottle().id)
     }
 
-    /// Runs an installer in a new bottle for `engine`, then adds what it installed to the library.
-    func install(_ url: URL, engine: Engine) {
+    /// Runs an installer in a bottle, then adds what it installed to the library. With nothing chosen
+    /// it goes in the default bottle, on the engine the last installer there used, so it sees what
+    /// that one installed.
+    func install(_ url: URL, engine requested: Engine? = nil, into choice: BottleChoice? = nil) {
         guard busyMessage == nil else { return }
-        busyMessage = "Preparing a fresh Windows environment…"
+        busyMessage = "Preparing the Windows environment…"
         installCancelled = false
         Task {
             defer {
@@ -155,100 +197,116 @@ final class AppModel {
             }
             var created: UUID?
             do {
+                let bottle: Bottle
+                switch choice {
+                case .new(let name):
+                    bottle = createBottle(named: name)
+                    created = bottle.id
+                case .existing(let id):
+                    guard let found = self.bottle(id) else { throw DecanterError("That bottle no longer exists.") }
+                    bottle = found
+                case nil:
+                    bottle = sharedBottle()
+                }
+                var engine = requested ?? bottle.installEngine
+                if runtime?.has(engine) == false && engine == .gptk { engine = .wine }
                 let runtime = try await readyRuntime(for: GameInstaller.renderer(for: engine))
-                let bottleID = try await GameInstaller.prepareBottle(engine: engine)
-                created = bottleID
-                busyMessage = "Running the installer. Finish it, and Decanter will pick up from there."
-                activeInstall = ActiveInstall(bottleID: bottleID, engine: engine, isNewGame: true)
-                try await GameInstaller.run(url, bottleID: bottleID, engine: engine, runtime: runtime)
+                let prefix = try await prefix(in: bottle.id, engine: engine)
+                if let index = bottles.firstIndex(where: { $0.id == bottle.id }) {
+                    bottles[index].lastEngine = engine.rawValue
+                    saveBottles()
+                }
+                let before = await Task.detached {
+                    GameInstaller.isolateDesktop(prefix: prefix)
+                    return BottleSnapshot.take(prefix: prefix)
+                }.value
+                busyMessage = "Running the installer in “\(bottle.displayName)”. Finish it, and Decanter will pick up from there."
+                activeInstall = ActiveInstall(prefix: prefix, engine: engine, isNewGame: true,
+                                              discardsOnCancel: created != nil)
+                try await GameInstaller.run(url, prefix: prefix, engine: engine, runtime: runtime)
                 activeInstall = nil
                 if installCancelled {
-                    BottleStore.delete(bottleID)
+                    if let created { discardBottle(created) }
                     return
                 }
                 busyMessage = "Looking for the game…"
                 let programs = await Task.detached {
-                    GameInstaller.installedPrograms(bottleID: bottleID, engine: engine)
+                    GameInstaller.installedPrograms(prefix: prefix, since: before)
                 }.value
                 if let choice = GameInstaller.obviousChoice(among: programs) {
-                    try await addInstalled([choice], bottleID: bottleID, engine: engine)
+                    addInstalled([choice], bottleID: bottle.id, engine: engine)
                 } else {
-                    installerResult = InstallerResult(bottleID: bottleID, engine: engine, programs: programs)
+                    installerResult = InstallerResult(
+                        bottleID: bottle.id, bottleName: bottle.displayName, prefix: prefix, engine: engine,
+                        createdBottle: created != nil, programs: programs)
                 }
             } catch {
-                if let created { BottleStore.delete(created) }
+                if let created { discardBottle(created) }
                 errorMessage = error.localizedDescription
             }
         }
     }
 
-    /// Abandons a running install and throws away its bottle.
+    /// Abandons a running install. A bottle made for it is thrown away; in a bottle that was already
+    /// there, whatever the installer wrote so far stays.
     func cancelInstall() {
         installCancelled = true
         finishInstall()
     }
 
-    /// Ends whatever is still running in the installer's bottle, for installers that leave a launcher
+    /// Ends whatever is still running in the installer's prefix, for installers that leave a launcher
     /// or the game itself open, so Decanter can carry on.
     func finishInstall() {
         guard let runtime, let active = activeInstall else { return }
         busyMessage = installCancelled ? "Cancelling…" : "Finishing up…"
-        Task { await GameInstaller.stop(bottleID: active.bottleID, engine: active.engine, runtime: runtime) }
+        Task { await Launcher.stop(prefix: active.prefix, engine: active.engine, runtime: runtime) }
     }
 
-    /// Adds installed programs as games. They share the bottle the installer ran in.
-    func addInstalled(_ programs: [InstalledProgram], bottleID: UUID, engine: Engine) async throws {
-        // Every game needs a bottle for the standard engine; the install lives in the one it ran on.
-        var standardBottle = bottleID
-        if engine != .wine {
-            standardBottle = UUID()
-            try await BottleStore.create(standardBottle)
-        }
+    /// Adds installed programs as games in the bottle the installer ran in.
+    func addInstalled(_ programs: [InstalledProgram], bottleID: UUID, engine: Engine) {
         for program in programs {
-            var game = Game(name: program.name, executablePath: program.executable.path, bottleID: standardBottle)
+            var game = Game(name: program.name, executablePath: program.executable.path, bottleID: bottleID)
             game.settings.arguments = program.arguments
             game.inspect(chooseRenderer: true)
             if engine != .wine {
-                game.setBottle(bottleID, for: engine)
                 // Stay on the engine the install belongs to: its registry entries exist nowhere else.
                 game.settings.renderer = GameInstaller.renderer(for: engine)
             }
             games.append(game)
+            loadArtwork(for: game)
         }
         LibraryStore.save(games)
+        fetchMissingCovers()
     }
 
     func addInstalled(_ programs: [InstalledProgram], from result: InstallerResult) {
-        Task {
-            do {
-                try await addInstalled(programs, bottleID: result.bottleID, engine: result.engine)
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
+        addInstalled(programs, bottleID: result.bottleID, engine: result.engine)
     }
 
     /// Lets the user point at the game inside the bottle when Decanter couldn't find it.
     func browseInstalled(_ result: InstallerResult) -> InstalledProgram? {
+        chooseProgram(in: result.prefix).map { InstalledProgram(executable: $0, name: GameNaming.displayName(for: $0)) }
+    }
+
+    private func chooseProgram(in prefix: URL) -> URL? {
         let panel = NSOpenPanel()
-        panel.directoryURL = BottleStore.driveC(result.bottleID)
+        panel.directoryURL = prefix.appendingPathComponent("drive_c", isDirectory: true)
         panel.allowedContentTypes = [.exe]
         panel.message = "Choose the game's program"
         panel.prompt = "Choose"
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        return InstalledProgram(executable: url, name: GameNaming.displayName(for: url))
+        return panel.runModal() == .OK ? panel.url : nil
     }
 
     func discardInstallerResult(_ result: InstallerResult) {
-        BottleStore.delete(result.bottleID)
+        if result.createdBottle { discardBottle(result.bottleID) }
     }
 
-    /// Runs a patch, DLC or component installer inside a game's existing bottle.
+    /// Runs a patch, DLC or component installer in the prefix a game runs in.
     func runInstaller(in game: Game) {
         guard runtime != nil, busyMessage == nil else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.exe, UTType(filenameExtension: "msi") ?? .data]
-        panel.message = "Choose a patch, add-on or installer to run in \(game.name)'s Windows environment"
+        panel.message = "Choose a patch, add-on or installer to run where \(game.name) is installed"
         panel.prompt = "Run"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         busyMessage = "Preparing…"
@@ -258,17 +316,132 @@ final class AppModel {
                 activeInstall = nil
             }
             do {
-                let game = try await prepared(game)
-                guard let runtime else { return }
+                let (runtime, prefix) = try await prepared(game)
                 let engine = runtime.engine(for: game.settings.renderer)
-                let bottleID = game.bottle(for: engine)
                 busyMessage = "Running \(url.lastPathComponent) for \(game.name)…"
-                activeInstall = ActiveInstall(bottleID: bottleID, engine: engine, isNewGame: false)
-                try await GameInstaller.run(url, bottleID: bottleID, engine: engine, runtime: runtime)
+                activeInstall = ActiveInstall(prefix: prefix, engine: engine, isNewGame: false)
+                try await GameInstaller.run(url, prefix: prefix, engine: engine, runtime: runtime)
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    // MARK: Bottles
+
+    func bottle(_ id: UUID) -> Bottle? { bottles.first { $0.id == id } }
+
+    func games(in bottle: Bottle) -> [Game] { games.filter { $0.bottleID == bottle.id } }
+
+    private func saveBottles() {
+        BottleStore.save(BottleList(bottles: bottles, defaultID: defaultBottleID))
+    }
+
+    /// The default bottle, made the first time something needs it.
+    @discardableResult
+    func sharedBottle() -> Bottle {
+        if let bottle = bottles.first(where: { $0.id == defaultBottleID }) { return bottle }
+        let bottle = createBottle(named: "Shared")
+        defaultBottleID = bottle.id
+        saveBottles()
+        return bottle
+    }
+
+    /// An empty bottle. Its Windows environment is made when something first runs in it.
+    @discardableResult
+    func createBottle(named name: String) -> Bottle {
+        let wanted = name.trimmingCharacters(in: .whitespaces).isEmpty ? "New Bottle" : name.trimmingCharacters(in: .whitespaces)
+        var unique = wanted, number = 2
+        while bottles.contains(where: { $0.name.caseInsensitiveCompare(unique) == .orderedSame }) {
+            unique = "\(wanted) \(number)"
+            number += 1
+        }
+        let bottle = Bottle(name: unique)
+        bottles.append(bottle)
+        saveBottles()
+        return bottle
+    }
+
+    func renameBottle(_ id: UUID, to name: String) {
+        guard let index = bottles.firstIndex(where: { $0.id == id }), bottles[index].name != name else { return }
+        bottles[index].name = name
+        saveBottles()
+    }
+
+    func setDefaultBottle(_ id: UUID) {
+        guard bottle(id) != nil else { return }
+        defaultBottleID = id
+        saveBottles()
+    }
+
+    /// Deletes a bottle with everything installed in it, and takes its games out of the library.
+    /// The default bottle stays: something has to receive new games.
+    func deleteBottle(_ id: UUID) {
+        guard id != defaultBottleID, let bottle = bottle(id) else { return }
+        for game in games(in: bottle) { forget(game) }
+        LibraryStore.save(games)
+        discardBottle(id)
+    }
+
+    private func discardBottle(_ id: UUID) {
+        guard let bottle = bottle(id) else { return }
+        bottles.removeAll { $0.id == id }
+        if defaultBottleID == id { defaultBottleID = nil }
+        saveBottles()
+        let runtime = runtime
+        Task {
+            // Wine keeps files open while it runs; stop it before the folder goes.
+            if let runtime { await Launcher.stop(bottle, runtime: runtime) }
+            BottleStore.delete(bottle)
+        }
+    }
+
+    /// The bottle's prefix for an engine, cloned from the template the first time it is needed.
+    private func prefix(in bottleID: UUID, engine: Engine) async throws -> URL {
+        guard let bottle = bottle(bottleID) else {
+            throw DecanterError("This game's bottle no longer exists. Choose another one in its settings.")
+        }
+        let key = bottleID.uuidString + engine.rawValue
+        let task = prefixTasks[key] ?? Task { try await BottleStore.ensurePrefix(for: engine, in: bottle) }
+        prefixTasks[key] = task
+        defer { prefixTasks[key] = nil }
+        let prefixID = try await task.value
+        if let index = bottles.firstIndex(where: { $0.id == bottleID }), bottles[index].prefixID(for: engine) != prefixID {
+            bottles[index].prefixes[engine.rawValue] = prefixID
+            saveBottles()
+        }
+        return BottleStore.prefix(prefixID)
+    }
+
+    func openDriveC(_ bottle: Bottle, engine: Engine) {
+        guard let prefix = bottle.prefix(for: engine) else { return }
+        NSWorkspace.shared.open(prefix.appendingPathComponent("drive_c", isDirectory: true))
+    }
+
+    /// Runs one of Wine's own tools (winecfg, regedit, …) in a bottle, on one of its engines.
+    func runTool(_ tool: String, in bottle: Bottle, engine: Engine) {
+        guard let runtime, let prefix = bottle.prefix(for: engine) else { return }
+        var probe = Game(name: bottle.displayName, executablePath: prefix.appendingPathComponent("drive_c").path,
+                         bottleID: bottle.id)
+        probe.settings.renderer = GameInstaller.renderer(for: engine)
+        start(tool, plan: Launcher.plan(game: probe, prefix: prefix, runtime: runtime))
+    }
+
+    private func start(_ tool: String, plan: LaunchPlan) {
+        var plan = plan
+        plan.arguments = [tool]
+        do {
+            _ = try Launcher.start(plan, log: Paths.logs.appendingPathComponent("tools.log")) { _ in }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Adds a program that is already in a bottle (installed by hand, or by an installer Decanter
+    /// couldn't follow) to the library.
+    func addProgram(from bottle: Bottle, engine: Engine) {
+        guard let prefix = bottle.prefix(for: engine), let url = chooseProgram(in: prefix) else { return }
+        addExecutable(url, bottleID: bottle.id, engine: engine)
     }
 
     // MARK: D3DMetal add-on
@@ -316,17 +489,11 @@ final class AppModel {
     }
 
     /// Gets everything a game's chosen engine needs in place before launch: downloads the CrossOver
-    /// engine the first time a game wants it, and creates the game's bottle for that engine.
-    private func prepared(_ game: Game) async throws -> Game {
+    /// engine the first time a game wants it, and makes its bottle's prefix for that engine.
+    private func prepared(_ game: Game) async throws -> (runtime: InstalledRuntime, prefix: URL) {
         let runtime = try await readyRuntime(for: game.settings.renderer)
-        let engine = runtime.engine(for: game.settings.renderer)
-        guard game.existingBottle(for: engine) == nil,
-              let index = games.firstIndex(where: { $0.id == game.id }) else { return game }
-        let id = UUID()
-        try await BottleStore.create(id, engine: engine)
-        games[index].setBottle(id, for: engine)
-        LibraryStore.save(games)
-        return games[index]
+        let prefix = try await prefix(in: game.bottleID, engine: runtime.engine(for: game.settings.renderer))
+        return (runtime, prefix)
     }
 
     func play(_ game: Game) {
@@ -339,17 +506,17 @@ final class AppModel {
         let id = game.id
         Task {
             do {
-                let game = try await prepared(game)
-                guard let runtime else { return }
+                let (runtime, prefix) = try await prepared(game)
                 if let index = games.firstIndex(where: { $0.id == id }) {
                     games[index].lastPlayed = Date()
                     LibraryStore.save(games)
                 }
-                await Launcher.applyRegistrySettings(game: game, runtime: runtime)
+                await Launcher.applyRegistrySettings(game: game, prefix: prefix, runtime: runtime)
                 let started = Date()
-                _ = try Launcher.start(Launcher.plan(game: game, runtime: runtime), log: logURL(for: game)) { status in
+                _ = try Launcher.start(Launcher.plan(game: game, prefix: prefix, runtime: runtime), log: logURL(for: game)) { status in
                     Task { @MainActor in
                         self.running.remove(id)
+                        self.addPlayTime(Date().timeIntervalSince(started), to: id)
                         if status != 0 && Date().timeIntervalSince(started) < 10 {
                             self.errorMessage = "\(game.name) quit right after starting. "
                                 + "Open its settings to try a different renderer or a fixed-size window, or check the log."
@@ -363,10 +530,15 @@ final class AppModel {
         }
     }
 
+    /// Wine can only end a whole prefix at once, so this also ends anything else running in the
+    /// game's bottle on the same engine.
     func stop(_ game: Game) {
         guard let runtime else { return }
+        let engine = runtime.engine(for: game.settings.renderer)
         Task {
-            await Launcher.stop(game, runtime: runtime)
+            if let prefix = bottle(game.bottleID)?.prefix(for: engine) {
+                await Launcher.stop(prefix: prefix, engine: engine, runtime: runtime)
+            }
             running.remove(game.id)
         }
     }
@@ -375,17 +547,127 @@ final class AppModel {
 
     func update(_ game: Game) {
         guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        var game = game
+        let programChanged = games[index].executablePath != game.executablePath
+        if programChanged { game.inspect(chooseRenderer: false) }
+        // Play time and the cover lookup can change while the settings sheet holds an older copy.
+        game.playSeconds = games[index].playSeconds
+        game.lastPlayed = games[index].lastPlayed
+        game.coverLookedUp = games[index].coverLookedUp
         games[index] = game
+        LibraryStore.save(games)
+        if programChanged { loadArtwork(for: game) }
+    }
+
+    func toggleFavorite(_ game: Game) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        games[index].favorite = games[index].isFavorite ? nil : true
         LibraryStore.save(games)
     }
 
-    func remove(_ game: Game) {
-        stop(game)
-        games.removeAll { $0.id == game.id }
+    private func addPlayTime(_ seconds: TimeInterval, to id: UUID) {
+        guard seconds > 0, let index = games.firstIndex(where: { $0.id == id }) else { return }
+        games[index].playSeconds = games[index].playTime + seconds
         LibraryStore.save(games)
-        for bottle in game.bottles where !games.contains(where: { $0.bottles.contains(bottle) }) {
-            BottleStore.delete(bottle)
+    }
+
+    func showInFinder(_ game: Game) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: game.executablePath)])
+    }
+
+    // MARK: Artwork
+
+    private func loadArtwork(for game: Game) {
+        covers[game.id] = CoverStore.data(for: game.id).flatMap(NSImage.init(data:))
+        icons[game.id] = ExecutableInspector.icon(of: URL(fileURLWithPath: game.executablePath))
+            .flatMap(NSImage.init(data:))
+    }
+
+    /// Saves image data as the game's cover. Returns false if it isn't an image.
+    @discardableResult
+    func setCover(_ data: Data, for game: Game) -> Bool {
+        guard let image = NSImage(data: data), image.isValid, image.size.width > 0 else { return false }
+        do {
+            try CoverStore.save(data, for: game.id)
+            covers[game.id] = image
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
+    }
+
+    func setCover(from file: URL, for game: Game) {
+        guard let data = try? Data(contentsOf: file), setCover(data, for: game) else {
+            errorMessage = "“\(file.lastPathComponent)” isn't an image Decanter can use as a cover."
+            return
+        }
+    }
+
+    func chooseCover(for game: Game) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.message = "Choose a cover image for \(game.name)"
+        panel.prompt = "Use as Cover"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        setCover(from: url, for: game)
+    }
+
+    func removeCover(for game: Game) {
+        CoverStore.remove(game.id)
+        covers[game.id] = nil
+    }
+
+    /// Looks up covers for games that have none and haven't been looked up before. Each game is tried
+    /// once; after that a cover only changes when the user picks one.
+    func fetchMissingCovers() {
+        guard Self.downloadsCoversAutomatically else { return }
+        for game in games where covers[game.id] == nil && game.coverLookedUp != true {
+            let id = game.id
+            let name = game.name
+            // Marked up front so a second call while this one is in flight doesn't repeat it.
+            setCoverLookedUp(true, for: id)
+            Task {
+                do {
+                    if let data = try await CoverFinder.cover(forGameNamed: name), covers[id] == nil,
+                       let game = games.first(where: { $0.id == id }) {
+                        setCover(data, for: game)
+                    }
+                } catch {
+                    // Offline or the store was unreachable: try again next launch.
+                    setCoverLookedUp(nil, for: id)
+                }
+            }
+        }
+    }
+
+    private func setCoverLookedUp(_ value: Bool?, for id: UUID) {
+        guard let index = games.firstIndex(where: { $0.id == id }) else { return }
+        games[index].coverLookedUp = value
+        LibraryStore.save(games)
+    }
+
+    /// True when removing the game would leave its bottle with nothing in it, so the bottle can go too.
+    func isOnlyGame(inItsBottle game: Game) -> Bool {
+        game.bottleID != defaultBottleID && !games.contains { $0.id != game.id && $0.bottleID == game.bottleID }
+    }
+
+    /// Takes a game out of the library. Its bottle, and whatever is installed there, stays unless
+    /// `deletingBottle` is set and no other game uses it.
+    func remove(_ game: Game, deletingBottle: Bool = false) {
+        let alone = isOnlyGame(inItsBottle: game)
+        if !deletingBottle || !alone { stop(game) }
+        forget(game)
+        LibraryStore.save(games)
+        if deletingBottle && alone { discardBottle(game.bottleID) }
+    }
+
+    private func forget(_ game: Game) {
+        games.removeAll { $0.id == game.id }
+        running.remove(game.id)
+        CoverStore.remove(game.id)
+        covers[game.id] = nil
+        icons[game.id] = nil
     }
 
     func logURL(for game: Game) -> URL { Paths.logs.appendingPathComponent("\(game.id.uuidString).log") }
@@ -400,20 +682,23 @@ final class AppModel {
     }
 
     func openDriveC(_ game: Game) {
-        let engine = runtime?.engine(for: game.settings.renderer) ?? .wine
-        NSWorkspace.shared.open(BottleStore.driveC(game.bottle(for: engine)))
+        Task {
+            do {
+                let (_, prefix) = try await prepared(game)
+                NSWorkspace.shared.open(prefix.appendingPathComponent("drive_c", isDirectory: true))
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
-    /// Runs one of Wine's own tools (winecfg, regedit, …) inside the game's bottle.
+    /// Runs one of Wine's own tools (winecfg, regedit, …) where the game runs.
     func runTool(_ tool: String, in game: Game) {
         guard runtime != nil else { return }
         Task {
             do {
-                let game = try await prepared(game)
-                guard let runtime else { return }
-                var plan = Launcher.plan(game: game, runtime: runtime)
-                plan.arguments = [tool]
-                _ = try Launcher.start(plan, log: Paths.logs.appendingPathComponent("tools.log")) { _ in }
+                let (runtime, prefix) = try await prepared(game)
+                start(tool, plan: Launcher.plan(game: game, prefix: prefix, runtime: runtime))
             } catch {
                 errorMessage = error.localizedDescription
             }
