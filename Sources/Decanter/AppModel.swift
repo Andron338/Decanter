@@ -61,6 +61,8 @@ final class AppModel {
     var busyMessage: String?
     var errorMessage: String?
     var running: Set<UUID> = []
+    /// Games that lowered the screen resolution to fill it; the last one to quit restores it.
+    private var fillingScreen: Set<UUID> = []
     var installerResult: InstallerResult?
     var installRequest: InstallRequest?
     var activeInstall: ActiveInstall?
@@ -512,16 +514,32 @@ final class AppModel {
                     LibraryStore.save(games)
                 }
                 await Launcher.applyRegistrySettings(game: game, prefix: prefix, runtime: runtime)
+                // Fill the screen: the Mac drops to the resolution that best fits the window, and the
+                // Windows desktop takes that size, leaving the game's own resolution to size the window.
+                var launched = game
+                var filled = false
                 // Scaled fullscreen: a virtual screen with the resolutions old games ask for stands
                 // in for the real one, which mirrors it. If it can't be made the game runs as before.
-                var launched = game
                 let scaled = game.settings.scaledFullscreen ? await ScaledFullscreen.begin() : false
                 if !scaled { launched.settings.scaledFullscreen = false }
+                if !scaled, game.settings.virtualDesktop, game.settings.fillScreen, !game.settings.retina,
+                   let window = DisplayFit.Size(game.settings.virtualDesktopSize),
+                   let screen = DisplayFit.apply(for: window) {
+                    launched.settings.virtualDesktopSize = screen.text
+                    filled = true
+                    fillingScreen.insert(id)
+                }
                 let started = Date()
+                let restoreScreen = {
+                    if scaled { ScaledFullscreen.end() }
+                    guard filled else { return }
+                    self.fillingScreen.remove(id)
+                    if self.fillingScreen.isEmpty { DisplayFit.restore() }
+                }
                 do {
                     _ = try Launcher.start(Launcher.plan(game: launched, prefix: prefix, runtime: runtime), log: logURL(for: game)) { status in
                         Task { @MainActor in
-                            if scaled { ScaledFullscreen.end() }
+                            restoreScreen()
                             self.running.remove(id)
                             self.addPlayTime(Date().timeIntervalSince(started), to: id)
                             if status != 0 && Date().timeIntervalSince(started) < 10 {
@@ -531,7 +549,7 @@ final class AppModel {
                         }
                     }
                 } catch {
-                    if scaled { ScaledFullscreen.end() }
+                    restoreScreen()
                     throw error
                 }
             } catch {

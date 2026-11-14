@@ -256,8 +256,21 @@ struct GameSettingsSheet: View {
                 }
                 .disabled(game.settings.scaledFullscreen)
                 if game.settings.virtualDesktop && !game.settings.scaledFullscreen {
-                    Picker("Window size", selection: $game.settings.virtualDesktopSize) {
+                    Picker(selection: $game.settings.virtualDesktopSize) {
+                        Text("Match screen").tag(Launcher.screenSizedDesktop)
                         ForEach(["1024x768", "1280x720", "1440x900", "1920x1080", "2560x1440"], id: \.self) { Text($0) }
+                    } label: {
+                        Text("Largest window size")
+                        Text("The window takes the resolution the game is set to, up to this size. "
+                             + "To make it bigger, raise the resolution in the game's own video options.")
+                    }
+                    if game.settings.virtualDesktopSize != Launcher.screenSizedDesktop {
+                        Toggle(isOn: $game.settings.fillScreen) {
+                            Text("Fill the screen")
+                            Text("Lowers the Mac's resolution while the game runs, so a window of this size nearly "
+                                 + "fills the screen. Set the game to this resolution in its video options.")
+                        }
+                        .disabled(game.settings.retina)
                     }
                 }
                 Toggle("High-resolution (Retina) rendering", isOn: $game.settings.retina)

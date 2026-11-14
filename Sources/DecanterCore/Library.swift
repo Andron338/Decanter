@@ -5,6 +5,9 @@ public struct GameSettings: Codable, Equatable {
     /// Run inside a fixed-size Wine desktop. Fixes old games that crash on fullscreen mode switches.
     public var virtualDesktop = false
     public var virtualDesktopSize = "1440x900"
+    /// With a fixed-size window: lower the Mac's screen resolution while the game runs, so the
+    /// window nearly fills the screen.
+    public var fillScreen = false
     /// Let the game switch to resolutions the Mac's screen doesn't have, scaled to the whole screen.
     /// See `ScaledFullscreen`. Takes the place of the fixed-size window.
     public var scaledFullscreen = false
@@ -34,6 +37,7 @@ public struct GameSettings: Codable, Equatable {
         renderer = (try? c.decodeIfPresent(Renderer.self, forKey: .renderer)) ?? d.renderer
         virtualDesktop = try c.decodeIfPresent(Bool.self, forKey: .virtualDesktop) ?? d.virtualDesktop
         virtualDesktopSize = try c.decodeIfPresent(String.self, forKey: .virtualDesktopSize) ?? d.virtualDesktopSize
+        fillScreen = try c.decodeIfPresent(Bool.self, forKey: .fillScreen) ?? d.fillScreen
         scaledFullscreen = try c.decodeIfPresent(Bool.self, forKey: .scaledFullscreen) ?? d.scaledFullscreen
         retina = try c.decodeIfPresent(Bool.self, forKey: .retina) ?? d.retina
         fastSync = try c.decodeIfPresent(Bool.self, forKey: .fastSync) ?? d.fastSync

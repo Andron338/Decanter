@@ -127,6 +127,12 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(plan.arguments, [
             "explorer", "/desktop=Decanter,1280x720", #"Z:\Games\My Game\x.exe"#, "-windowed", "-name", "John Doe",
         ])
+
+        // "Match screen" becomes the main screen's size when the game starts.
+        game.settings.virtualDesktopSize = Launcher.screenSizedDesktop
+        XCTAssertEqual(Launcher.desktopSize(game.settings, screen: (1800, 1169)), "1800x1169")
+        let size = Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments[1].dropFirst("/desktop=Decanter,".count)
+        XCTAssertEqual(size.split(separator: "x").compactMap { Int($0) }.count, 2, "always a real size, with or without a screen")
     }
 
     @MainActor
@@ -148,6 +154,21 @@ final class DecanterCoreTests: XCTestCase {
         game.settings.scaledFullscreen = true
         let plan = Launcher.plan(game: game, prefix: URL(fileURLWithPath: "/prefix"), runtime: runtime)
         XCTAssertEqual(plan.arguments, ["/Games/g.exe"])
+    }
+
+    func testFillScreenPicksTheSmallestResolutionTheWindowFitsOn() {
+        typealias Size = DisplayFit.Size
+        // A 14-inch MacBook Pro's modes: none is 4:3.
+        let modes = [(960, 600), (1024, 665), (1147, 745), (1280, 800), (1352, 878), (1512, 982), (1800, 1169), (3024, 1964)]
+            .map { Size(width: $0.0, height: $0.1) }
+        XCTAssertEqual(DisplayFit.bestMode(for: Size(width: 1024, height: 768), among: modes), Size(width: 1280, height: 800))
+        XCTAssertEqual(DisplayFit.bestMode(for: Size(width: 800, height: 600), among: modes), Size(width: 1024, height: 665))
+        // 1512x982 leaves no room for the menu bar above a 960-point window.
+        XCTAssertEqual(DisplayFit.bestMode(for: Size(width: 1280, height: 960), among: modes), Size(width: 1800, height: 1169))
+        XCTAssertNil(DisplayFit.bestMode(for: Size(width: 4000, height: 3000), among: modes))
+        XCTAssertEqual(Size("1024x768"), Size(width: 1024, height: 768))
+        XCTAssertNil(Size(Launcher.screenSizedDesktop))
+        XCTAssertEqual(Size(width: 1280, height: 800).text, "1280x800")
     }
 
     func testMsiGoesThroughMsiexec() {

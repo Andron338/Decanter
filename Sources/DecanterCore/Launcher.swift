@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 public struct LaunchPlan: Equatable {
@@ -59,7 +60,7 @@ public enum Launcher {
         if exe.pathExtension.lowercased() == "msi" {
             arguments = ["msiexec", "/i", windowsPath(exe)]
         } else if game.settings.virtualDesktop && !game.settings.scaledFullscreen {
-            arguments = ["explorer", "/desktop=Decanter,\(game.settings.virtualDesktopSize)", windowsPath(exe)]
+            arguments = ["explorer", "/desktop=Decanter,\(desktopSize(game.settings))", windowsPath(exe)]
         } else {
             arguments = [exe.path]
         }
@@ -69,6 +70,23 @@ public enum Launcher {
             arguments: arguments,
             environment: gameEnvironment(game, prefix: prefix, runtime: runtime),
             workingDirectory: workingDirectory(for: game))
+    }
+
+    /// The `virtualDesktopSize` that means "as large as the Mac's main screen".
+    public static let screenSizedDesktop = "screen"
+
+    /// The size of the fixed window's Windows desktop. It is also the largest resolution the game
+    /// can pick: the window then shrinks to whatever the game chose.
+    static func desktopSize(_ settings: GameSettings, screen: (width: Int, height: Int)? = nil) -> String {
+        guard settings.virtualDesktopSize == screenSizedDesktop else { return settings.virtualDesktopSize }
+        guard let screen = screen ?? mainScreenSize(retina: settings.retina) else { return GameSettings().virtualDesktopSize }
+        return "\(screen.width)x\(screen.height)"
+    }
+
+    /// In Retina mode Wine counts the screen's real pixels, otherwise its points.
+    static func mainScreenSize(retina: Bool) -> (width: Int, height: Int)? {
+        guard let mode = CGDisplayCopyDisplayMode(CGMainDisplayID()), mode.width > 0, mode.height > 0 else { return nil }
+        return retina ? (mode.pixelWidth, mode.pixelHeight) : (mode.width, mode.height)
     }
 
     static func workingDirectory(for game: Game) -> URL {
