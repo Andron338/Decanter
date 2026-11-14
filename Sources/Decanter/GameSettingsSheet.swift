@@ -159,6 +159,9 @@ struct GameSettingsSheet: View {
                 }
             }
             Section {
+                Picker("Bottle", selection: $game.bottleID) {
+                    ForEach(model.bottles) { Text($0.displayName).tag($0.id) }
+                }
                 LabeledContent("C: drive") {
                     Button("Open in Finder") { model.openDriveC(game) }
                 }
@@ -171,7 +174,7 @@ struct GameSettingsSheet: View {
             } header: {
                 Text("Windows Environment")
             } footer: {
-                Text("Each game has its own Windows environment, so a patch or a registry change here can't affect any other game.")
+                Text("Games in the same bottle share one Windows environment, so installers and patches see each other's files. Moving a game to another bottle doesn't move what was installed for it; do that only for games that live outside Decanter. Manage bottles from the + menu.")
             }
         }
         .formStyle(.grouped)
@@ -220,7 +223,7 @@ struct GameSettingsSheet: View {
                 }
                 if game.settings.renderer == .crossover {
                     Text(model.runtime?.hasCrossOver == true
-                         ? "Runs on CrossOver's Wine 9 in its own Windows environment, separate from the other renderers."
+                         ? "Runs on CrossOver's Wine 9, which keeps its own Windows environment inside the bottle, separate from the other renderers."
                          : "Runs on CrossOver's Wine 9. Decanter downloads it (about 165 MB) the first time you press Play.")
                         .font(.caption).foregroundStyle(.secondary)
                 }

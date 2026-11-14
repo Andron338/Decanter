@@ -27,6 +27,7 @@ public enum Paths {
     public static var template: URL { root.appendingPathComponent("Template", isDirectory: true) }
     public static var runtimeManifest: URL { root.appendingPathComponent("runtime.json") }
     public static var library: URL { root.appendingPathComponent("library.json") }
+    public static var bottleList: URL { root.appendingPathComponent("bottles.json") }
 
     public static func ensure(_ url: URL) throws {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

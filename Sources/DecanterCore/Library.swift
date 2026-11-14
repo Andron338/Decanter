@@ -50,11 +50,11 @@ public struct Game: Codable, Identifiable, Equatable {
     public var name: String
     /// Absolute macOS path to the .exe (inside the bottle or anywhere on disk).
     public var executablePath: String
-    /// The game's bottle for the standard Wine engine. Installers run here.
+    /// The bottle the game runs in. Several games can share one.
     public var bottleID: UUID
-    /// A second bottle, created on first use, for when the game runs on D3DMetal (Apple's Wine).
+    /// Only read from libraries saved when every game had a bottle per engine; `BottleStore.adopt`
+    /// folds these into the bottle list and clears them.
     public var gptkBottleID: UUID?
-    /// A bottle for the CrossOver engine, created on first use.
     public var crossoverBottleID: UUID?
     public var settings = GameSettings()
     public var lastPlayed: Date?
@@ -85,28 +85,6 @@ public struct Game: Codable, Identifiable, Equatable {
             settings.renderer = renderer
         }
     }
-
-    /// nil when this game has no bottle for that engine yet. Engines can't share bottles: each is a
-    /// different Wine version, and Wine prefixes don't survive a downgrade.
-    public func existingBottle(for engine: Engine) -> UUID? {
-        switch engine {
-        case .wine: return bottleID
-        case .gptk: return gptkBottleID
-        case .crossover: return crossoverBottleID
-        }
-    }
-
-    public func bottle(for engine: Engine) -> UUID { existingBottle(for: engine) ?? bottleID }
-
-    public mutating func setBottle(_ id: UUID, for engine: Engine) {
-        switch engine {
-        case .wine: bottleID = id
-        case .gptk: gptkBottleID = id
-        case .crossover: crossoverBottleID = id
-        }
-    }
-
-    public var bottles: [UUID] { Engine.allCases.compactMap(existingBottle) }
 }
 
 public enum LibraryStore {
@@ -124,8 +102,112 @@ public enum LibraryStore {
     }
 }
 
-/// A bottle is one isolated Windows environment (a WINEPREFIX). Every game gets its own.
+/// A bottle is a named Windows environment that any number of games can be installed in, so an
+/// installer, patch or add-on run there sees what is already installed.
+public struct Bottle: Codable, Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var created: Date
+    /// The folder holding each engine's Wine prefix, by `Engine.rawValue`. Engines can't share a prefix:
+    /// each is a different Wine version, and prefixes don't survive a downgrade. Made on first use.
+    public var prefixes: [String: UUID]
+    /// The engine an installer last ran on here, which is where the next one should run to see it.
+    public var lastEngine: String?
+
+    public init(id: UUID = UUID(), name: String, prefixes: [String: UUID] = [:]) {
+        self.id = id
+        self.name = name
+        self.created = Date()
+        self.prefixes = prefixes
+    }
+
+    public var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? "Untitled Bottle" : trimmed
+    }
+
+    public func prefixID(for engine: Engine) -> UUID? { prefixes[engine.rawValue] }
+
+    /// nil until something has run in this bottle on that engine.
+    public func prefix(for engine: Engine) -> URL? { prefixID(for: engine).map(BottleStore.prefix) }
+
+    public var engines: [Engine] { Engine.allCases.filter { prefixes[$0.rawValue] != nil } }
+
+    public var installEngine: Engine { lastEngine.flatMap(Engine.init(rawValue:)) ?? engines.first ?? .wine }
+}
+
+public struct BottleList: Codable, Equatable {
+    public var bottles: [Bottle] = []
+    /// Where new games and installers go unless the user picks another.
+    public var defaultID: UUID?
+
+    public init(bottles: [Bottle] = [], defaultID: UUID? = nil) {
+        self.bottles = bottles
+        self.defaultID = defaultID
+    }
+}
+
 public enum BottleStore {
+    public static func load() -> BottleList {
+        guard let data = try? Data(contentsOf: Paths.bottleList) else { return BottleList() }
+        return (try? JSONDecoder().decode(BottleList.self, from: data)) ?? BottleList()
+    }
+
+    public static func save(_ list: BottleList) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(list) else { return }
+        try? Paths.ensure(Paths.root)
+        try? data.write(to: Paths.bottleList, options: .atomic)
+    }
+
+    /// The bottle list, with a bottle for every game in the library. Libraries from before bottles
+    /// had names are converted on the way: each game keeps the environment it already had.
+    public static func loadAdopting() -> BottleList {
+        var list = load()
+        var games = LibraryStore.load()
+        let (bottlesChanged, gamesChanged) = adopt(games: &games, into: &list)
+        // Bottles first: a library without its legacy fields is useless without the list they went to.
+        if bottlesChanged { save(list) }
+        if gamesChanged { LibraryStore.save(games) }
+        return list
+    }
+
+    /// Adds a bottle for each game whose bottle isn't listed, and moves the per-engine bottles that
+    /// older libraries kept on the game itself into its bottle.
+    static func adopt(games: inout [Game], into list: inout BottleList) -> (bottles: Bool, games: Bool) {
+        var bottlesChanged = false, gamesChanged = false
+        var adopted: [UUID: [String]] = [:]
+        for index in games.indices {
+            let game = games[index]
+            var position = list.bottles.firstIndex { $0.id == game.bottleID }
+            if position == nil {
+                // Until now a game's bottle id was also its standard prefix's folder name.
+                list.bottles.append(Bottle(id: game.bottleID, name: game.name,
+                                           prefixes: [Engine.wine.rawValue: game.bottleID]))
+                position = list.bottles.count - 1
+                adopted[game.bottleID] = []
+                bottlesChanged = true
+            }
+            if adopted[game.bottleID] != nil { adopted[game.bottleID]?.append(game.name) }
+            for (engine, legacy) in [(Engine.gptk, game.gptkBottleID), (.crossover, game.crossoverBottleID)] {
+                guard let legacy else { continue }
+                if list.bottles[position!].prefixID(for: engine) == nil {
+                    list.bottles[position!].prefixes[engine.rawValue] = legacy
+                    bottlesChanged = true
+                }
+                gamesChanged = true
+            }
+            games[index].gptkBottleID = nil
+            games[index].crossoverBottleID = nil
+        }
+        for (id, names) in adopted where names.count > 1 {
+            guard let position = list.bottles.firstIndex(where: { $0.id == id }) else { continue }
+            list.bottles[position].name = "\(names[0]) + \(names.count - 1) more"
+        }
+        return (bottlesChanged, gamesChanged)
+    }
+
     public static func templatePrefix(_ engine: Engine) -> URL {
         let name: String
         switch engine {
@@ -145,8 +227,6 @@ public enum BottleStore {
             .appendingPathComponent("prefix", isDirectory: true)
     }
 
-    public static func driveC(_ id: UUID) -> URL { prefix(id).appendingPathComponent("drive_c", isDirectory: true) }
-
     /// Clones the template prefix. On APFS this is instant and takes no extra disk until files diverge.
     public static func create(_ id: UUID, engine: Engine = .wine) async throws {
         let dest = prefix(id)
@@ -154,14 +234,31 @@ public enum BottleStore {
         try await Shell.run("/bin/cp", ["-Rcp", templatePrefix(engine).path, dest.path])
     }
 
+    /// The folder of the bottle's prefix for `engine`, cloning the template the first time. The caller
+    /// records the returned id in the bottle.
+    public static func ensurePrefix(for engine: Engine, in bottle: Bottle) async throws -> UUID {
+        let id = bottle.prefixID(for: engine) ?? UUID()
+        if !FileManager.default.fileExists(atPath: prefix(id).path) { try await create(id, engine: engine) }
+        return id
+    }
+
     public static func delete(_ id: UUID) {
         try? FileManager.default.removeItem(at: Paths.bottles.appendingPathComponent(id.uuidString))
     }
 
-    /// Executables present in the bottle but not in the template, i.e. what an installer just put there.
-    static func newExecutables(prefix: URL, templatePrefix: URL) -> [URL] {
-        let known = Set(executables(under: templatePrefix.appendingPathComponent("drive_c")).map(\.relative))
-        return executables(under: prefix.appendingPathComponent("drive_c"))
+    /// Deletes every engine's prefix of a bottle, with everything installed in them.
+    public static func delete(_ bottle: Bottle) {
+        for id in bottle.prefixes.values { delete(id) }
+    }
+
+    /// Every program on the prefix's C: drive, as paths relative to it.
+    static func executablePaths(prefix: URL) -> Set<String> {
+        Set(executables(under: prefix.appendingPathComponent("drive_c")).map(\.relative))
+    }
+
+    /// Executables in the prefix that aren't in `known`, i.e. what an installer just put there.
+    static func newExecutables(prefix: URL, known: Set<String>) -> [URL] {
+        executables(under: prefix.appendingPathComponent("drive_c"))
             .filter { !known.contains($0.relative) && !GameNaming.isHelperExecutable($0.url) }
             .map(\.url)
             .sorted { $0.path.count < $1.path.count }

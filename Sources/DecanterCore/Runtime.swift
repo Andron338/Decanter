@@ -50,6 +50,14 @@ public struct InstalledRuntime: Codable, Equatable {
     public var hasD3DMetal: Bool { gptkPath != nil }
     public var hasCrossOver: Bool { crossoverPath != nil }
 
+    public func has(_ engine: Engine) -> Bool {
+        switch engine {
+        case .wine: return true
+        case .gptk: return hasD3DMetal
+        case .crossover: return hasCrossOver
+        }
+    }
+
     /// The renderer that will actually be used, falling back when the requested one isn't installed.
     public func effectiveRenderer(_ requested: Renderer) -> Renderer {
         switch requested {

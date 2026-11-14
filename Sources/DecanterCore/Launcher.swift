@@ -52,7 +52,8 @@ public enum Launcher {
         }
     }
 
-    public static func plan(game: Game, runtime: InstalledRuntime) -> LaunchPlan {
+    /// `prefix` is the game's bottle's prefix for the engine its renderer runs on.
+    public static func plan(game: Game, prefix: URL, runtime: InstalledRuntime) -> LaunchPlan {
         let exe = URL(fileURLWithPath: game.executablePath)
         var arguments: [String]
         if exe.pathExtension.lowercased() == "msi" {
@@ -66,7 +67,7 @@ public enum Launcher {
         return LaunchPlan(
             executable: runtime.wine(for: game.settings.renderer),
             arguments: arguments,
-            environment: gameEnvironment(game, runtime: runtime),
+            environment: gameEnvironment(game, prefix: prefix, runtime: runtime),
             workingDirectory: workingDirectory(for: game))
     }
 
@@ -80,9 +81,11 @@ public enum Launcher {
         return URL(fileURLWithPath: game.executablePath).deletingLastPathComponent()
     }
 
-    static func gameEnvironment(_ game: Game, runtime: InstalledRuntime, quiet: Bool = false) -> [String: String] {
+    static func gameEnvironment(
+        _ game: Game, prefix: URL, runtime: InstalledRuntime, quiet: Bool = false
+    ) -> [String: String] {
         let engine = runtime.engine(for: game.settings.renderer)
-        return environment(prefix: BottleStore.prefix(game.bottle(for: engine)), settings: game.settings,
+        return environment(prefix: prefix, settings: game.settings,
                            engine: engine, quiet: quiet, libraryFallback: runtime.libraryFallback(for: engine))
     }
 
@@ -114,30 +117,32 @@ public enum Launcher {
         try await Shell.run(runtime.wineserver(for: renderer), ["-w"], environment: plan.environment, check: false)
     }
 
-    /// Kills every Windows process in the game's bottle(s).
-    public static func stop(_ game: Game, runtime: InstalledRuntime) async {
-        var renderers: [Renderer] = [.wine]
-        if game.gptkBottleID != nil && runtime.hasD3DMetal { renderers.append(.d3dmetal) }
-        if game.crossoverBottleID != nil && runtime.hasCrossOver { renderers.append(.crossover) }
-        for renderer in renderers {
-            var probe = game
-            probe.settings.renderer = renderer
-            let env = gameEnvironment(probe, runtime: runtime, quiet: true)
-            _ = try? await Shell.run(runtime.wineserver(for: renderer), ["-k"], environment: env, check: false)
+    /// Ends every Windows process in a prefix: the game, and anything else running beside it there.
+    public static func stop(prefix: URL, engine: Engine, runtime: InstalledRuntime) async {
+        let env = environment(prefix: prefix, settings: GameSettings(), engine: engine, quiet: true,
+                              libraryFallback: runtime.libraryFallback(for: engine))
+        _ = try? await Shell.run(runtime.wineserver(for: GameInstaller.renderer(for: engine)), ["-k"],
+                                 environment: env, check: false)
+    }
+
+    /// Ends everything running in a bottle, on every engine it has been used with.
+    public static func stop(_ bottle: Bottle, runtime: InstalledRuntime) async {
+        for engine in bottle.engines where runtime.has(engine) {
+            if let prefix = bottle.prefix(for: engine) { await stop(prefix: prefix, engine: engine, runtime: runtime) }
         }
     }
 
-    /// Applies settings that live in the Windows registry rather than the environment.
-    public static func applyRegistrySettings(game: Game, runtime: InstalledRuntime) async {
-        let engine = runtime.engine(for: game.settings.renderer)
-        let marker = BottleStore.prefix(game.bottle(for: engine)).deletingLastPathComponent().appendingPathComponent("retina")
+    /// Applies settings that live in the Windows registry rather than the environment. Games sharing
+    /// a bottle share its registry, so this runs before each launch and only when the value differs.
+    public static func applyRegistrySettings(game: Game, prefix: URL, runtime: InstalledRuntime) async {
+        let marker = prefix.deletingLastPathComponent().appendingPathComponent("retina")
         let wanted = game.settings.retina ? "y" : "n"
         let current = (try? String(contentsOf: marker, encoding: .utf8)) ?? "n"
         guard wanted != current else { return }
         let result = try? await Shell.run(
             runtime.wine(for: game.settings.renderer),
             ["reg", "add", #"HKCU\Software\Wine\Mac Driver"#, "/v", "RetinaMode", "/d", wanted, "/f"],
-            environment: gameEnvironment(game, runtime: runtime, quiet: true), check: false)
+            environment: gameEnvironment(game, prefix: prefix, runtime: runtime, quiet: true), check: false)
         if result?.status == 0 { try? wanted.write(to: marker, atomically: true, encoding: .utf8) }
     }
 

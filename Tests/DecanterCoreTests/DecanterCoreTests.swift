@@ -3,14 +3,16 @@ import XCTest
 
 final class DecanterCoreTests: XCTestCase {
     let runtime = InstalledRuntime(wineTag: "11.21", dxmtTag: "v0.80", basePath: "/rt/base", metalPath: "/rt/metal")
+    /// Where the plans below are told the game's bottle keeps its prefix.
+    let prefix = URL(fileURLWithPath: "/bottles/x/prefix")
 
     func testPlanUsesMetalRuntimeByDefault() {
         let game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
-        let plan = Launcher.plan(game: game, runtime: runtime)
+        let plan = Launcher.plan(game: game, prefix: prefix, runtime: runtime)
         XCTAssertEqual(plan.executable.path, "/rt/metal/bin/wine")
         XCTAssertEqual(plan.arguments, ["/Games/X/x.exe"])
         XCTAssertEqual(plan.workingDirectory.path, "/Games/X")
-        XCTAssertEqual(plan.environment["WINEPREFIX"], BottleStore.prefix(game.bottleID).path)
+        XCTAssertEqual(plan.environment["WINEPREFIX"], prefix.path)
         XCTAssertEqual(plan.environment["WINEMSYNC"], "1")
         XCTAssertNil(plan.environment["MTL_HUD_ENABLED"])
     }
@@ -18,52 +20,94 @@ final class DecanterCoreTests: XCTestCase {
     func testPlanFallsBackToBaseRuntime() {
         var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
         game.settings.renderer = .wine
-        XCTAssertEqual(Launcher.plan(game: game, runtime: runtime).executable.path, "/rt/base/bin/wine")
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).executable.path, "/rt/base/bin/wine")
 
         var noMetal = runtime
         noMetal.metalPath = nil
         game.settings.renderer = .metal
-        XCTAssertEqual(Launcher.plan(game: game, runtime: noMetal).executable.path, "/rt/base/bin/wine")
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: noMetal).executable.path, "/rt/base/bin/wine")
     }
 
-    func testD3DMetalUsesItsOwnEngineAndBottle() {
+    func testD3DMetalUsesItsOwnEngine() {
         var withGPTK = runtime
         withGPTK.gptkPath = "/rt/gptk"
         var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
-        game.gptkBottleID = UUID()
         game.settings.renderer = .d3dmetal
         game.settings.rayTracing = true
-        let plan = Launcher.plan(game: game, runtime: withGPTK)
+        XCTAssertEqual(withGPTK.engine(for: .d3dmetal), .gptk)
+        let plan = Launcher.plan(game: game, prefix: prefix, runtime: withGPTK)
         XCTAssertEqual(plan.executable.path, "/rt/gptk/bin/wine64")
-        XCTAssertEqual(plan.environment["WINEPREFIX"], BottleStore.prefix(game.gptkBottleID!).path)
         XCTAssertEqual(plan.environment["D3DM_SUPPORT_DXR"], "1")
         XCTAssertNil(plan.environment["D3DM_ENABLE_METALFX"])
 
-        // Not installed: falls back to DXMT in the standard bottle, with no D3DMetal variables.
-        let fallback = Launcher.plan(game: game, runtime: runtime)
+        // Not installed: falls back to DXMT on the standard engine, with no D3DMetal variables.
+        XCTAssertEqual(runtime.engine(for: .d3dmetal), .wine)
+        XCTAssertFalse(runtime.has(.gptk))
+        let fallback = Launcher.plan(game: game, prefix: prefix, runtime: runtime)
         XCTAssertEqual(fallback.executable.path, "/rt/metal/bin/wine")
-        XCTAssertEqual(fallback.environment["WINEPREFIX"], BottleStore.prefix(game.bottleID).path)
         XCTAssertNil(fallback.environment["D3DM_SUPPORT_DXR"])
     }
 
-    func testCrossOverUsesItsOwnEngineBottleAndBorrowedLibraries() {
+    func testCrossOverUsesItsOwnEngineAndBorrowedLibraries() {
         var withCX = runtime
         withCX.crossoverPath = "/rt/cx"
         var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
         game.settings.renderer = .crossover
-        XCTAssertNil(game.existingBottle(for: .crossover))
-        game.setBottle(UUID(), for: .crossover)
-        let plan = Launcher.plan(game: game, runtime: withCX)
+        let plan = Launcher.plan(game: game, prefix: prefix, runtime: withCX)
         XCTAssertEqual(plan.executable.path, "/rt/cx/bin/wine")
-        XCTAssertEqual(plan.environment["WINEPREFIX"], BottleStore.prefix(game.crossoverBottleID!).path)
+        XCTAssertEqual(plan.environment["WINEPREFIX"], prefix.path)
         XCTAssertEqual(plan.environment["DYLD_FALLBACK_LIBRARY_PATH"], "/rt/cx/lib:/rt/base/lib:/usr/local/lib:/usr/lib")
-        XCTAssertEqual(game.bottles.count, 2)
 
-        // Not installed yet: runs on the main Wine in the standard bottle, with no library override.
-        let fallback = Launcher.plan(game: game, runtime: runtime)
+        // Not installed yet: runs on the main Wine, with no library override.
+        let fallback = Launcher.plan(game: game, prefix: prefix, runtime: runtime)
         XCTAssertEqual(fallback.executable.path, "/rt/base/bin/wine")
-        XCTAssertEqual(fallback.environment["WINEPREFIX"], BottleStore.prefix(game.bottleID).path)
         XCTAssertNil(fallback.environment["DYLD_FALLBACK_LIBRARY_PATH"])
+    }
+
+    func testBottleKeepsAPrefixPerEngine() {
+        var bottle = Bottle(name: " ")
+        XCTAssertEqual(bottle.displayName, "Untitled Bottle")
+        XCTAssertNil(bottle.prefix(for: .crossover))
+        XCTAssertEqual(bottle.installEngine, .wine)
+        let folder = UUID()
+        bottle.prefixes[Engine.crossover.rawValue] = folder
+        XCTAssertEqual(bottle.prefix(for: .crossover), BottleStore.prefix(folder))
+        XCTAssertEqual(bottle.engines, [.crossover])
+        // With nothing recorded, installers go where the bottle already has something.
+        XCTAssertEqual(bottle.installEngine, .crossover)
+        bottle.lastEngine = Engine.gptk.rawValue
+        XCTAssertEqual(bottle.installEngine, .gptk)
+        let saved = try? JSONDecoder().decode(Bottle.self, from: JSONEncoder().encode(bottle))
+        XCTAssertEqual(saved, bottle)
+    }
+
+    func testOlderLibrariesKeepTheirBottles() {
+        let shared = UUID(), cx = UUID(), gptk = UUID(), otherCX = UUID()
+        var first = Game(name: "First", executablePath: "/g/a.exe", bottleID: shared)
+        first.crossoverBottleID = cx
+        var second = Game(name: "Second", executablePath: "/g/b.exe", bottleID: shared)
+        second.crossoverBottleID = otherCX
+        second.gptkBottleID = gptk
+        let alone = Game(name: "Alone", executablePath: "/g/c.exe", bottleID: UUID())
+        var games = [first, second, alone]
+        var list = BottleList()
+        let changed = BottleStore.adopt(games: &games, into: &list)
+        XCTAssertTrue(changed.bottles && changed.games)
+        XCTAssertEqual(list.bottles.map(\.name), ["First + 1 more", "Alone"])
+        XCTAssertNil(list.defaultID)
+        // The bottle's id is the game's old one, so the library needs no rewriting.
+        XCTAssertEqual(list.bottles[0].id, shared)
+        XCTAssertEqual(list.bottles[0].prefixID(for: .wine), shared)
+        XCTAssertEqual(list.bottles[0].prefixID(for: .crossover), cx)
+        XCTAssertEqual(list.bottles[0].prefixID(for: .gptk), gptk)
+        XCTAssertEqual(list.bottles[1].engines, [.wine])
+        XCTAssertTrue(games.allSatisfy { $0.gptkBottleID == nil && $0.crossoverBottleID == nil })
+
+        // A second pass has nothing left to do, and renamed bottles keep their names.
+        list.bottles[1].name = "Mine"
+        let again = BottleStore.adopt(games: &games, into: &list)
+        XCTAssertFalse(again.bottles || again.games)
+        XCTAssertEqual(list.bottles.map(\.name), ["First + 1 more", "Mine"])
     }
 
     func testOldSettingsStillDecode() throws {
@@ -79,7 +123,7 @@ final class DecanterCoreTests: XCTestCase {
         game.settings.virtualDesktop = true
         game.settings.virtualDesktopSize = "1280x720"
         game.settings.arguments = #"-windowed -name "John Doe""#
-        let plan = Launcher.plan(game: game, runtime: runtime)
+        let plan = Launcher.plan(game: game, prefix: prefix, runtime: runtime)
         XCTAssertEqual(plan.arguments, [
             "explorer", "/desktop=Decanter,1280x720", #"Z:\Games\My Game\x.exe"#, "-windowed", "-name", "John Doe",
         ])
@@ -87,7 +131,7 @@ final class DecanterCoreTests: XCTestCase {
 
     func testMsiGoesThroughMsiexec() {
         let game = Game(name: "X", executablePath: "/tmp/thing.msi", bottleID: UUID())
-        XCTAssertEqual(Launcher.plan(game: game, runtime: runtime).arguments, ["msiexec", "/i", #"Z:\tmp\thing.msi"#])
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments, ["msiexec", "/i", #"Z:\tmp\thing.msi"#])
     }
 
     func testInstallerDetection() {
@@ -315,7 +359,7 @@ final class DecanterCoreTests: XCTestCase {
         // Installers usually add a desktop shortcut to the same launcher.
         try makeShortcut(target: #"C:\Games\AvP2\Avp2.exe"#)
             .write(to: prefix.appendingPathComponent("drive_c/users/me/Desktop/AvP 2.lnk"))
-        let programs = GameInstaller.installedPrograms(prefix: prefix, templatePrefix: template)
+        let programs = GameInstaller.installedPrograms(prefix: prefix, since: .take(prefix: template))
         let choice = try XCTUnwrap(GameInstaller.obviousChoice(among: programs))
         XCTAssertEqual(choice.name, "AvP 2")
         XCTAssertEqual(choice.executable.lastPathComponent, "Lithtech.exe")
@@ -363,7 +407,7 @@ final class DecanterCoreTests: XCTestCase {
         try makeShortcut(target: #"C:\GOG Games\Foo\Foo.exe"#)
             .write(to: prefix.appendingPathComponent("drive_c/users/me/Desktop/Foo Deluxe.lnk"))
 
-        let programs = GameInstaller.installedPrograms(prefix: prefix, templatePrefix: template)
+        let programs = GameInstaller.installedPrograms(prefix: prefix, since: .take(prefix: template))
         XCTAssertEqual(programs.map(\.name), ["Foo Deluxe", "Foo"])
         XCTAssertEqual(programs.map(\.executable.lastPathComponent), ["Foo.exe", "config.exe"])
         XCTAssertEqual(programs.map(\.hasShortcut), [true, false])
@@ -371,6 +415,33 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(GameInstaller.obviousChoice(among: programs), programs[0])
         XCTAssertNil(GameInstaller.obviousChoice(among: Array(programs.dropFirst()) + [programs[1]]))
         XCTAssertNil(GameInstaller.resolve(windowsPath: #"C:\GOG Games\Missing\x.exe"#, prefix: prefix))
+    }
+
+    func testInstallingIntoASharedBottleOnlyOffersWhatIsNew() throws {
+        let folder = try temporaryFolder()
+        let fm = FileManager.default
+        let prefix = try makePrefix(in: folder, named: "bottle", files: [
+            "Games/Old/Old.exe", "users/me/Desktop/placeholder",
+        ])
+        let desktop = prefix.appendingPathComponent("drive_c/users/me/Desktop")
+        try makeShortcut(target: #"C:\Games\Old\Old.exe"#).write(to: desktop.appendingPathComponent("Old.lnk"))
+        let before = BottleSnapshot.take(prefix: prefix)
+        XCTAssertTrue(GameInstaller.installedPrograms(prefix: prefix, since: before).isEmpty)
+
+        // A second game arrives beside the first, which the installer could see and patch.
+        let new = prefix.appendingPathComponent("drive_c/Games/New/New.exe")
+        try fm.createDirectory(at: new.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: new)
+        try makeShortcut(target: #"C:\Games\New\New.exe"#).write(to: desktop.appendingPathComponent("New Game.lnk"))
+        let programs = GameInstaller.installedPrograms(prefix: prefix, since: before)
+        XCTAssertEqual(programs.map(\.name), ["New Game"])
+        XCTAssertEqual(GameInstaller.obviousChoice(among: programs)?.executable.lastPathComponent, "New.exe")
+
+        // A patch that rewrites the old game's shortcut offers that game again.
+        let later = BottleSnapshot.take(prefix: prefix)
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(60)],
+                             ofItemAtPath: desktop.appendingPathComponent("Old.lnk").path)
+        XCTAssertEqual(GameInstaller.installedPrograms(prefix: prefix, since: later).map(\.name), ["Old"])
     }
 
     func testInstallBottleGetsItsOwnDesktop() throws {
@@ -388,12 +459,11 @@ final class DecanterCoreTests: XCTestCase {
     func testInstallerPlanRunsOnTheChosenEngine() {
         var withCrossOver = runtime
         withCrossOver.crossoverPath = "/rt/cx"
-        let bottle = UUID()
-        let plan = GameInstaller.plan(for: URL(fileURLWithPath: "/d/setup.exe"), bottleID: bottle, engine: .crossover,
+        let plan = GameInstaller.plan(for: URL(fileURLWithPath: "/d/setup.exe"), prefix: prefix, engine: .crossover,
                                       runtime: withCrossOver, arguments: "/S")
         XCTAssertEqual(plan.executable.path, "/rt/cx/bin/wine")
         XCTAssertEqual(plan.arguments, ["/d/setup.exe", "/S"])
-        XCTAssertEqual(plan.environment["WINEPREFIX"], BottleStore.prefix(bottle).path)
+        XCTAssertEqual(plan.environment["WINEPREFIX"], prefix.path)
         XCTAssertEqual(plan.environment["WINEDLLOVERRIDES"], "winemenubuilder.exe=d")
         XCTAssertEqual(plan.workingDirectory.path, "/d")
     }
@@ -402,22 +472,22 @@ final class DecanterCoreTests: XCTestCase {
         var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
         game.settings.dllOverrides = " dinput8=n,b "
         game.settings.environment = "# a comment\nDXVK_HUD = fps\n\nnot a variable\n9 LIVES=1\nWINEPREFIX=/elsewhere\nEMPTY=\nPATHS=a=b"
-        let environment = Launcher.plan(game: game, runtime: runtime).environment
+        let environment = Launcher.plan(game: game, prefix: prefix, runtime: runtime).environment
         XCTAssertEqual(environment["WINEDLLOVERRIDES"], "dinput8=n,b")
         XCTAssertEqual(environment["DXVK_HUD"], "fps")
         XCTAssertEqual(environment["EMPTY"], "")
         XCTAssertEqual(environment["PATHS"], "a=b")
         XCTAssertNil(environment["9 LIVES"])
-        XCTAssertEqual(environment["WINEPREFIX"], BottleStore.prefix(game.bottleID).path)
+        XCTAssertEqual(environment["WINEPREFIX"], prefix.path)
         XCTAssertEqual(Launcher.parseEnvironment(game.settings.environment).map(\.name),
                        ["DXVK_HUD", "WINEPREFIX", "EMPTY", "PATHS"])
 
         let folder = try temporaryFolder()
         game.settings.workingDirectory = folder.path
-        XCTAssertEqual(Launcher.plan(game: game, runtime: runtime).workingDirectory.path, folder.path)
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).workingDirectory.path, folder.path)
         // A folder that has gone missing falls back to the program's own.
         game.settings.workingDirectory = folder.appendingPathComponent("gone").path
-        XCTAssertEqual(Launcher.plan(game: game, runtime: runtime).workingDirectory.path, "/Games/X")
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).workingDirectory.path, "/Games/X")
     }
 
     func testOldLibraryEntriesStillDecode() throws {

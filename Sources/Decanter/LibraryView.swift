@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 enum LibraryFilter: Hashable {
     case all, recent, favorites, running
     case renderer(Renderer)
+    case bottle(UUID)
 }
 
 enum LibrarySort: String, CaseIterable, Identifiable {
@@ -31,6 +32,8 @@ struct LibraryView: View {
     @State private var importing = false
     /// The file chooser was opened from "Install from Installer…", so whatever is picked is run as one.
     @State private var importingInstaller = false
+    /// The bottle "Install into This Bottle…" was chosen on; nil offers the default one.
+    @State private var installing: UUID?
     @State private var dropTargeted = false
     @State private var filter: LibraryFilter? = .all
     @State private var selection: Game.ID?
@@ -53,7 +56,7 @@ struct LibraryView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: windowsTypes, allowsMultipleSelection: true) { result in
             guard case .success(let urls) = result else { return }
             if importingInstaller, let first = urls.first {
-                model.requestInstall(first)
+                model.requestInstall(first, bottleID: installing)
             } else {
                 model.add(urls)
             }
@@ -62,19 +65,36 @@ struct LibraryView: View {
         .sheet(item: $model.editing) { GameSettingsSheet(game: $0) }
         .sheet(item: $model.installerResult) { InstallerResultSheet(result: $0) }
         .sheet(item: $model.coverSearch) { CoverSearchSheet(game: $0) }
+        .sheet(isPresented: $model.managingBottles) { BottlesSheet(initial: selectedBottleID) }
         .confirmationDialog(
             "Remove \(model.pendingRemoval?.name ?? "this game")?",
             isPresented: Binding(get: { model.pendingRemoval != nil }, set: { if !$0 { model.pendingRemoval = nil } }),
             presenting: model.pendingRemoval
         ) { game in
-            Button("Remove", role: .destructive) {
-                if selection == game.id { selection = nil }
-                model.remove(game)
+            if model.isOnlyGame(inItsBottle: game) {
+                Button("Remove and Delete Its Bottle", role: .destructive) { remove(game, deletingBottle: true) }
+                Button("Remove from Library Only") { remove(game, deletingBottle: false) }
+            } else {
+                Button("Remove", role: .destructive) { remove(game, deletingBottle: false) }
             }
             Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("This deletes the game's Windows environment, including anything installed in it and saves kept there. Files outside Decanter aren't touched.")
+        } message: { game in
+            let bottle = model.bottle(game.bottleID)?.displayName ?? "its bottle"
+            Text(model.isOnlyGame(inItsBottle: game)
+                 ? "It is the only game in the bottle “\(bottle)”. Deleting the bottle also deletes anything installed in it and saves kept there. Files outside Decanter aren't touched."
+                 : "The game leaves your library. Anything it installed stays in the bottle “\(bottle)”, which other games may rely on. Files outside Decanter aren't touched.")
         }
+    }
+
+    private func remove(_ game: Game, deletingBottle: Bool) {
+        if selection == game.id { selection = nil }
+        model.remove(game, deletingBottle: deletingBottle)
+    }
+
+    /// The bottle the sidebar is showing, which is where the bottle manager opens.
+    private var selectedBottleID: UUID? {
+        if case .bottle(let id) = filter { return id }
+        return nil
     }
 
     // MARK: Sidebar
@@ -97,6 +117,28 @@ struct LibraryView: View {
                     ForEach(renderers) { sidebarRow(.renderer($0), $0.shortName, $0.symbol) }
                 }
             }
+            if !model.bottles.isEmpty {
+                Section("Bottles") {
+                    ForEach(model.bottles) { bottle in
+                        sidebarRow(.bottle(bottle.id), bottle.displayName,
+                                   bottle.id == model.defaultBottleID ? "wineglass.fill" : "wineglass")
+                            .contextMenu {
+                                Button("Install into This Bottle…") { chooseFile(installer: true, bottle: bottle.id) }
+                                if bottle.id != model.defaultBottleID {
+                                    Button("Make Default") { model.setDefaultBottle(bottle.id) }
+                                }
+                                Divider()
+                                Button("Manage Bottles…") {
+                                    filter = .bottle(bottle.id)
+                                    model.managingBottles = true
+                                }
+                            }
+                    }
+                }
+            }
+        }
+        .onChange(of: model.bottles.map(\.id)) { _, ids in
+            if let id = selectedBottleID, !ids.contains(id) { filter = .all }
         }
         .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 260)
     }
@@ -116,6 +158,7 @@ struct LibraryView: View {
         case .favorites: return model.games.filter(\.isFavorite)
         case .running: return model.games.filter { model.running.contains($0.id) }
         case .renderer(let renderer): return model.games.filter { $0.settings.renderer == renderer }
+        case .bottle(let id): return model.games.filter { $0.bottleID == id }
         }
     }
 
@@ -278,6 +321,9 @@ struct LibraryView: View {
                     .keyboardShortcut("o")
                 Button("Install from Installer…") { chooseFile(installer: true) }
                     .keyboardShortcut("i")
+                Divider()
+                Button("Manage Bottles…") { model.managingBottles = true }
+                    .keyboardShortcut("b")
             } label: {
                 Label("Add Game", systemImage: "plus")
             } primaryAction: {
@@ -295,7 +341,9 @@ struct LibraryView: View {
                 HStack {
                     if active.isNewGame {
                         Button("Cancel Install", role: .destructive) { model.cancelInstall() }
-                            .help("Stop the installer and throw away what it installed so far")
+                            .help(active.discardsOnCancel
+                                  ? "Stop the installer and throw away the bottle made for it"
+                                  : "Stop the installer. What it already put in the bottle stays there")
                         Button("Installer Is Done") { model.finishInstall() }
                             .help("Use this if the installer has finished but left a launcher or the game running")
                     } else {
@@ -310,7 +358,8 @@ struct LibraryView: View {
         .shadow(radius: 20)
     }
 
-    private func chooseFile(installer: Bool) {
+    private func chooseFile(installer: Bool, bottle: UUID? = nil) {
+        installing = bottle
         importingInstaller = installer
         importing = true
     }

@@ -59,26 +59,37 @@ do {
         guard let path = arguments.first else { throw DecanterError("usage: decanter-cli install <installer> [engine]") }
         guard let runtime = RuntimeManager.load() else { throw DecanterError("Run `decanter-cli setup` first.") }
         let engine = arguments.dropFirst().first.flatMap(Engine.init(rawValue:)) ?? .wine
-        let bottleID = try await GameInstaller.prepareBottle(engine: engine)
-        print("Running the installer in bottle \(bottleID.uuidString)…")
-        try await GameInstaller.run(URL(fileURLWithPath: path), bottleID: bottleID, engine: engine, runtime: runtime,
+        // Installs go in a bottle of their own, which the app then lists like any other.
+        var list = BottleStore.loadAdopting()
+        var bottle = Bottle(name: GameNaming.displayName(for: URL(fileURLWithPath: path)))
+        let prefixID = try await BottleStore.ensurePrefix(for: engine, in: bottle)
+        bottle.prefixes[engine.rawValue] = prefixID
+        bottle.lastEngine = engine.rawValue
+        list.bottles.append(bottle)
+        BottleStore.save(list)
+        let prefix = BottleStore.prefix(prefixID)
+        GameInstaller.isolateDesktop(prefix: prefix)
+        let before = BottleSnapshot.take(prefix: prefix)
+        print("Running the installer in bottle “\(bottle.name)” (\(prefixID.uuidString))…")
+        try await GameInstaller.run(URL(fileURLWithPath: path), prefix: prefix, engine: engine, runtime: runtime,
                                     arguments: arguments.dropFirst(2).joined(separator: " "))
-        let programs = GameInstaller.installedPrograms(bottleID: bottleID, engine: engine)
+        let programs = GameInstaller.installedPrograms(prefix: prefix, since: before)
         if programs.isEmpty { print("Nothing new was installed.") }
         let choice = GameInstaller.obviousChoice(among: programs)
         for program in programs {
             print("\(program == choice ? "→" : " ") \(program.name)\(program.hasShortcut ? " (shortcut)" : ""): \(program.executable.path)")
         }
     case "scan":
-        // decanter-cli scan <bottle id> [engine]: what an installer left in a bottle.
+        // decanter-cli scan <prefix id> [engine]: everything in a prefix that its template didn't have.
         let arguments = Array(CommandLine.arguments.dropFirst(2))
-        guard let id = arguments.first.flatMap(UUID.init(uuidString:)) else { throw DecanterError("usage: decanter-cli scan <bottle id> [engine]") }
+        guard let id = arguments.first.flatMap(UUID.init(uuidString:)) else { throw DecanterError("usage: decanter-cli scan <prefix id> [engine]") }
         let engine = arguments.dropFirst().first.flatMap(Engine.init(rawValue:)) ?? .wine
-        for program in GameInstaller.installedPrograms(bottleID: id, engine: engine) {
+        let template = BottleSnapshot.take(prefix: BottleStore.templatePrefix(engine))
+        for program in GameInstaller.installedPrograms(prefix: BottleStore.prefix(id), since: template) {
             print("\(program.name)\(program.hasShortcut ? " (shortcut)" : ""): \(program.executable.path) \(program.arguments)")
         }
     default:
-        print("usage: decanter-cli [setup|d3dmetal|crossover|status|inspect <exe>…|icon <exe> <out.ico>|install <installer> [engine]|scan <bottle id> [engine]]")
+        print("usage: decanter-cli [setup|d3dmetal|crossover|status|inspect <exe>…|icon <exe> <out.ico>|install <installer> [engine]|scan <prefix id> [engine]]")
         exit(2)
     }
 } catch {
