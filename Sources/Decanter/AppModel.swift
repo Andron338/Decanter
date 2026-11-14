@@ -512,16 +512,27 @@ final class AppModel {
                     LibraryStore.save(games)
                 }
                 await Launcher.applyRegistrySettings(game: game, prefix: prefix, runtime: runtime)
+                // Scaled fullscreen: a virtual screen with the resolutions old games ask for stands
+                // in for the real one, which mirrors it. If it can't be made the game runs as before.
+                var launched = game
+                let scaled = game.settings.scaledFullscreen ? await ScaledFullscreen.begin() : false
+                if !scaled { launched.settings.scaledFullscreen = false }
                 let started = Date()
-                _ = try Launcher.start(Launcher.plan(game: game, prefix: prefix, runtime: runtime), log: logURL(for: game)) { status in
-                    Task { @MainActor in
-                        self.running.remove(id)
-                        self.addPlayTime(Date().timeIntervalSince(started), to: id)
-                        if status != 0 && Date().timeIntervalSince(started) < 10 {
-                            self.errorMessage = "\(game.name) quit right after starting. "
-                                + "Open its settings to try a different renderer or a fixed-size window, or check the log."
+                do {
+                    _ = try Launcher.start(Launcher.plan(game: launched, prefix: prefix, runtime: runtime), log: logURL(for: game)) { status in
+                        Task { @MainActor in
+                            if scaled { ScaledFullscreen.end() }
+                            self.running.remove(id)
+                            self.addPlayTime(Date().timeIntervalSince(started), to: id)
+                            if status != 0 && Date().timeIntervalSince(started) < 10 {
+                                self.errorMessage = "\(game.name) quit right after starting. "
+                                    + "Open its settings to try a different renderer or a fixed-size window, or check the log."
+                            }
                         }
                     }
+                } catch {
+                    if scaled { ScaledFullscreen.end() }
+                    throw error
                 }
             } catch {
                 running.remove(id)

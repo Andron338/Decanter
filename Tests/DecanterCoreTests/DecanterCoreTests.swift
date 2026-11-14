@@ -129,6 +129,27 @@ final class DecanterCoreTests: XCTestCase {
         ])
     }
 
+    @MainActor
+    func testScaledFullscreenOffersClassicResolutionsUpToTheScreensPixels() {
+        typealias Size = ScaledFullscreen.Size
+        let modes = ScaledFullscreen.modes(desktop: Size(width: 1800, height: 1169), panel: Size(width: 3024, height: 1964))
+        XCTAssertEqual(modes.first, Size(width: 1800, height: 1169), "the desktop's own size is where the screen starts")
+        XCTAssertTrue(modes.contains(Size(width: 800, height: 600)))
+        XCTAssertTrue(modes.contains(Size(width: 2560, height: 1600)))
+        // A screen with few pixels offers nothing larger than itself, and its own size only once.
+        let small = ScaledFullscreen.modes(desktop: Size(width: 1280, height: 800), panel: Size(width: 1280, height: 800))
+        XCTAssertFalse(small.contains(Size(width: 1280, height: 960)))
+        XCTAssertEqual(small.filter { $0 == Size(width: 1280, height: 800) }.count, 1)
+    }
+
+    func testScaledFullscreenTakesThePlaceOfTheFixedSizeWindow() {
+        var game = Game(name: "G", executablePath: "/Games/g.exe", bottleID: UUID())
+        game.settings.virtualDesktop = true
+        game.settings.scaledFullscreen = true
+        let plan = Launcher.plan(game: game, prefix: URL(fileURLWithPath: "/prefix"), runtime: runtime)
+        XCTAssertEqual(plan.arguments, ["/Games/g.exe"])
+    }
+
     func testMsiGoesThroughMsiexec() {
         let game = Game(name: "X", executablePath: "/tmp/thing.msi", bottleID: UUID())
         XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments, ["msiexec", "/i", #"Z:\tmp\thing.msi"#])

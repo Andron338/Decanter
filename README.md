@@ -45,6 +45,15 @@ the renderer (DXMT, Apple's D3DMetal, the CrossOver engine, or Wine 11's built-i
 MSync, DLL overrides (for mod loaders), environment variables, and Wine's own configuration and registry
 editor.
 
+**Scaled fullscreen.** A Mac's screen only offers its own resolutions, so a game that asks for 800x600 or
+1024x768 is refused and ends up in a small window. With *Scaled fullscreen* on in a game's *Graphics*
+settings, Decanter puts a virtual screen that has those resolutions in charge while the game runs and makes
+the real screen mirror it: the game goes fullscreen as it would on a PC, and macOS scales the picture to
+the whole screen, with black bars where the shape differs. The Mac's screen is back to normal when the game
+quits (or if Decanter does). Everything looks softer meanwhile, because the virtual screen isn't Retina.
+Virtual screens come from an undocumented part of macOS, the one display utilities use. Confirmed so far
+with Need for Speed Carbon on the CrossOver engine.
+
 Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete that folder to uninstall.
 
 ## Design notes

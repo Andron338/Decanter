@@ -9,7 +9,8 @@ let package = Package(
         .executable(name: "Decanter", targets: ["Decanter"]),
     ],
     targets: [
-        .target(name: "DecanterCore"),
+        .target(name: "CVirtualDisplay"),
+        .target(name: "DecanterCore", dependencies: ["CVirtualDisplay"]),
         .executableTarget(name: "Decanter", dependencies: ["DecanterCore"]),
         .executableTarget(name: "decanter-cli", dependencies: ["DecanterCore"]),
         .testTarget(name: "DecanterCoreTests", dependencies: ["DecanterCore"]),

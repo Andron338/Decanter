@@ -58,7 +58,7 @@ public enum Launcher {
         var arguments: [String]
         if exe.pathExtension.lowercased() == "msi" {
             arguments = ["msiexec", "/i", windowsPath(exe)]
-        } else if game.settings.virtualDesktop {
+        } else if game.settings.virtualDesktop && !game.settings.scaledFullscreen {
             arguments = ["explorer", "/desktop=Decanter,\(game.settings.virtualDesktopSize)", windowsPath(exe)]
         } else {
             arguments = [exe.path]

@@ -244,11 +244,18 @@ struct GameSettingsSheet: View {
                 Text("If a game shows a black screen or quits at launch, try another renderer.")
             }
             Section("Display") {
+                Toggle(isOn: $game.settings.scaledFullscreen) {
+                    Text("Scaled fullscreen")
+                    Text("For games stuck in a small window: lets the game use resolutions this Mac's screen "
+                         + "doesn't have, such as 800x600 or 1024x768, stretched to the whole screen with black "
+                         + "bars at the sides. The Mac's screen looks softer while the game runs.")
+                }
                 Toggle(isOn: $game.settings.virtualDesktop) {
                     Text("Run in a fixed-size window")
                     Text("Fixes older games that crash when switching to fullscreen.")
                 }
-                if game.settings.virtualDesktop {
+                .disabled(game.settings.scaledFullscreen)
+                if game.settings.virtualDesktop && !game.settings.scaledFullscreen {
                     Picker("Window size", selection: $game.settings.virtualDesktopSize) {
                         ForEach(["1024x768", "1280x720", "1440x900", "1920x1080", "2560x1440"], id: \.self) { Text($0) }
                     }
