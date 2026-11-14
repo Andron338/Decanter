@@ -302,7 +302,10 @@ public enum GameNaming {
         let stem = url.deletingPathExtension().lastPathComponent.lowercased()
         let helpers = ["unins", "crash", "redist", "vcredist", "dxsetup", "dotnet", "directx", "setup",
                        "install", "updater", "helper", "report", "cefprocess", "webhelper", "ue4prereq"]
-        return helpers.contains { stem.contains($0) }
+        if helpers.contains(where: { stem.contains($0) }) { return true }
+        // `nfs_inst.exe`, `game-uninst.exe`: only as a whole word, so `against.exe` stays a game.
+        let words = stem.split { !$0.isLetter && !$0.isNumber }
+        return words.contains { $0 == "inst" || $0 == "uninst" }
     }
 
     /// Best-effort display name: the game's folder if it's descriptive, otherwise the exe name tidied up.

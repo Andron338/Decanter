@@ -301,18 +301,28 @@ public enum GameInstaller {
         var programs: [InstalledProgram] = []
         var seen = Set<String>()
         var launchers = Set<String>()
+        var listed: [String: Int] = [:]
         for link in shortcuts(in: prefix) {
             guard !snapshot.contains(shortcut: link, in: prefix),
                   let shortcut = WindowsShortcut(url: link),
                   let target = resolve(windowsPath: shortcut.target, prefix: prefix),
                   target.pathExtension.lowercased() == "exe",
-                  !GameNaming.isHelperExecutable(target),
-                  seen.insert(identity(target)).inserted else { continue }
+                  !GameNaming.isHelperExecutable(target) else { continue }
             let label = link.deletingPathExtension().lastPathComponent
-            guard !["uninstall", "remove ", "readme", "manual"].contains(where: label.lowercased().contains) else {
-                seen.remove(identity(target))
+            guard !["uninstall", "remove ", "readme", "manual"].contains(where: label.lowercased().contains) else { continue }
+            let arguments = shortcut.arguments.trimmingCharacters(in: .whitespaces)
+            // Several shortcuts to one program: "Foo Safe Mode" (with arguments) sorts before plain
+            // "Foo", which is the game itself. A same-named desktop shortcut changes nothing.
+            if let index = listed[identity(target)] {
+                let kept = programs[index].name.lowercased()
+                if !programs[index].arguments.isEmpty, arguments.isEmpty,
+                   kept != label.lowercased(), kept.hasPrefix(label.lowercased()) {
+                    programs[index].name = label
+                    programs[index].arguments = ""
+                }
                 continue
             }
+            guard seen.insert(identity(target)).inserted else { continue }
             // A shortcut to a launcher menu means the game behind it; the launcher stays in the list below.
             if let direct = LauncherDetector.directStart(for: target), seen.insert(identity(direct.executable)).inserted {
                 launchers.insert(identity(target))
@@ -320,7 +330,8 @@ public enum GameInstaller {
                                                  arguments: direct.arguments, hasShortcut: true))
                 continue
             }
-            programs.append(InstalledProgram(executable: target, name: label, arguments: shortcut.arguments, hasShortcut: true))
+            listed[identity(target)] = programs.count
+            programs.append(InstalledProgram(executable: target, name: label, arguments: arguments, hasShortcut: true))
         }
         seen.subtract(launchers)
         for url in BottleStore.newExecutables(prefix: prefix, known: snapshot.executables)

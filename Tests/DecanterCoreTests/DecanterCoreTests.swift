@@ -417,6 +417,31 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertNil(GameInstaller.resolve(windowsPath: #"C:\GOG Games\Missing\x.exe"#, prefix: prefix))
     }
 
+    func testPlainShortcutWinsOverVariantsOfTheSameProgram() throws {
+        let folder = try temporaryFolder()
+        let template = try makePrefix(in: folder, named: "template", files: [])
+        let prefix = try makePrefix(in: folder, named: "bottle", files: [
+            "EA/Carbon/nfsc.exe", "EA/Carbon/nfs_inst.exe", "EA/Carbon/nfs_uninst.exe", "EA/Carbon/against.exe",
+        ])
+        let startMenu = prefix.appendingPathComponent("drive_c/ProgramData/Microsoft/Windows/Start Menu/Programs/Carbon")
+        try FileManager.default.createDirectory(at: startMenu, withIntermediateDirectories: true)
+        // "Carbon Safemode.lnk" sorts before "Carbon.lnk", and the installer spells the target differently.
+        try makeShortcut(target: #"C:\EA\Carbon\nfsc.exe"#, arguments: "/s").write(to: startMenu.appendingPathComponent("Carbon Safemode.lnk"))
+        try makeShortcut(target: #"C:\EA\Carbon\NFSC.exe"#).write(to: startMenu.appendingPathComponent("Carbon.lnk"))
+
+        let programs = GameInstaller.installedPrograms(prefix: prefix, since: .take(prefix: template))
+        XCTAssertEqual(programs.map(\.name), ["Carbon", "Carbon"])
+        XCTAssertEqual(programs.map(\.executable.lastPathComponent), ["nfsc.exe", "against.exe"])
+        XCTAssertEqual(programs[0].arguments, "")
+        XCTAssertEqual(GameInstaller.obviousChoice(among: programs), programs[0])
+
+        // With only the variant, its arguments are kept.
+        try FileManager.default.removeItem(at: startMenu.appendingPathComponent("Carbon.lnk"))
+        let variant = GameInstaller.installedPrograms(prefix: prefix, since: .take(prefix: template))
+        XCTAssertEqual(variant.first?.name, "Carbon Safemode")
+        XCTAssertEqual(variant.first?.arguments, "/s")
+    }
+
     func testInstallingIntoASharedBottleOnlyOffersWhatIsNew() throws {
         let folder = try temporaryFolder()
         let fm = FileManager.default
