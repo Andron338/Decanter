@@ -19,6 +19,8 @@ public struct GameSettings: Codable, Equatable {
     public var environment = ""
     /// Folder the game starts in; empty means the folder its program is in.
     public var workingDirectory = ""
+    /// Windows language as a locale name (`ru_RU`); empty picks one from the Mac's languages.
+    public var language = ""
 
     public init() {}
 
@@ -39,6 +41,7 @@ public struct GameSettings: Codable, Equatable {
         dllOverrides = try c.decodeIfPresent(String.self, forKey: .dllOverrides) ?? d.dllOverrides
         environment = try c.decodeIfPresent(String.self, forKey: .environment) ?? d.environment
         workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory) ?? d.workingDirectory
+        language = try c.decodeIfPresent(String.self, forKey: .language) ?? d.language
     }
 }
 

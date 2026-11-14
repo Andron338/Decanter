@@ -67,7 +67,8 @@ public struct WindowsShortcut: Equatable, Sendable {
         self.init(data: data)
     }
 
-    public init?(data: Data) {
+    /// `preferredLanguages` decides the codepage of the non-Unicode strings old installers write.
+    public init?(data: Data, preferredLanguages: [String] = Locale.preferredLanguages) {
         let bytes = [UInt8](data)
         func u16(_ offset: Int) -> Int? {
             offset >= 0 && offset + 2 <= bytes.count ? Int(bytes[offset]) | Int(bytes[offset + 1]) << 8 : nil
@@ -80,7 +81,7 @@ public struct WindowsShortcut: Equatable, Sendable {
             guard offset >= 0, offset < bytes.count else { return nil }
             let end = bytes[offset...].firstIndex(of: 0) ?? bytes.count
             let raw = Array(bytes[offset..<end])
-            return String(bytes: raw, encoding: .utf8) ?? String(bytes: raw, encoding: .windowsCP1252)
+            return WindowsLanguage.decodeANSI(raw, preferred: preferredLanguages)
         }
         func wide(at offset: Int, maxUnits: Int = 4096) -> String? {
             guard offset >= 0, offset < bytes.count else { return nil }
@@ -128,7 +129,9 @@ public struct WindowsShortcut: Equatable, Sendable {
             let raw = Array(bytes[(offset + 2)..<(offset + 2 + length)])
             strings[flag] = unicode
                 ? String(decoding: stride(from: 0, to: raw.count - 1, by: 2).map { UInt16(raw[$0]) | UInt16(raw[$0 + 1]) << 8 }, as: UTF16.self)
-                : String(bytes: raw, encoding: .utf8) ?? String(bytes: raw, encoding: .windowsCP1252) ?? ""
+                : WindowsLanguage.decodeANSI(raw, preferred: preferredLanguages) ?? ""
+            // Counted strings aren't terminated, but some writers include a NUL (or nothing else) anyway.
+            strings[flag]?.removeAll { $0 == "\0" }
             offset += 2 + length
         }
         workingDirectory = strings[0x10] ?? ""
@@ -151,6 +154,38 @@ public struct WindowsShortcut: Equatable, Sendable {
         }
         guard !path.isEmpty else { return nil }
         target = path
+    }
+}
+
+/// Recognises launcher menus (the window with Play, Options and Uninstall buttons that old games
+/// open first) whose way of starting the real game can be read from the launcher itself.
+public enum LauncherDetector {
+    public struct DirectStart: Equatable, Sendable {
+        public var executable: URL
+        public var arguments: String
+    }
+
+    /// LithTech games (No One Lives Forever, Aliens vs. Predator 2, Tron 2.0…) ship a launcher that
+    /// runs `lithtech.exe -cmdfile <game>cmds.txt` from its own folder. nil for anything else.
+    public static func directStart(for program: URL) -> DirectStart? {
+        let fm = FileManager.default
+        let folder = program.deletingLastPathComponent()
+        guard program.lastPathComponent.lowercased() != "lithtech.exe",
+              let names = try? fm.contentsOfDirectory(atPath: folder.path),
+              let engine = names.first(where: { $0.lowercased() == "lithtech.exe" }),
+              let size = try? program.resourceValues(forKeys: [.fileSizeKey]).fileSize, size < 64 << 20,
+              let data = try? Data(contentsOf: program, options: .mappedIfSafe) else { return nil }
+        let text = data.map { $0 >= 0x41 && $0 <= 0x5A ? $0 | 0x20 : $0 }
+        let marker = Array("lithtech.exe -cmdfile ".utf8)
+        guard let start = text.withUnsafeBytes({ (bytes: UnsafeRawBufferPointer) -> Int? in
+            memmem(bytes.baseAddress, bytes.count, marker, marker.count).map { bytes.baseAddress!.distance(to: $0) }
+        }) else { return nil }
+        // The file name as the launcher spells it, read from the original bytes.
+        let tail = data.dropFirst(start + marker.count).prefix(64)
+        let file = String(decoding: tail.prefix { $0 > 0x20 && $0 < 0x7F && $0 != 0x22 }, as: UTF8.self)
+        guard !file.isEmpty, !file.contains("\\"), !file.contains("/"),
+              let commands = names.first(where: { $0.caseInsensitiveCompare(file) == .orderedSame }) else { return nil }
+        return DirectStart(executable: folder.appendingPathComponent(engine), arguments: "-cmdfile \(commands)")
     }
 }
 
@@ -251,6 +286,7 @@ public enum GameInstaller {
     static func installedPrograms(prefix: URL, templatePrefix: URL) -> [InstalledProgram] {
         var programs: [InstalledProgram] = []
         var seen = Set<String>()
+        var launchers = Set<String>()
         for link in shortcuts(in: prefix) {
             guard let shortcut = WindowsShortcut(url: link),
                   let target = resolve(windowsPath: shortcut.target, prefix: prefix),
@@ -262,8 +298,16 @@ public enum GameInstaller {
                 seen.remove(identity(target))
                 continue
             }
+            // A shortcut to a launcher menu means the game behind it; the launcher stays in the list below.
+            if let direct = LauncherDetector.directStart(for: target), seen.insert(identity(direct.executable)).inserted {
+                launchers.insert(identity(target))
+                programs.append(InstalledProgram(executable: direct.executable, name: label,
+                                                 arguments: direct.arguments, hasShortcut: true))
+                continue
+            }
             programs.append(InstalledProgram(executable: target, name: label, arguments: shortcut.arguments, hasShortcut: true))
         }
+        seen.subtract(launchers)
         for url in BottleStore.newExecutables(prefix: prefix, templatePrefix: templatePrefix)
         where seen.insert(identity(url)).inserted {
             programs.append(InstalledProgram(executable: url, name: GameNaming.displayName(for: url)))

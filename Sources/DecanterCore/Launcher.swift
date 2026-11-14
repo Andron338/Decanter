@@ -10,7 +10,7 @@ public struct LaunchPlan: Equatable {
 public enum Launcher {
     public static func environment(
         prefix: URL, settings: GameSettings, engine: Engine = .wine, quiet: Bool = false,
-        libraryFallback: String? = nil
+        libraryFallback: String? = nil, preferredLanguages: [String] = Locale.preferredLanguages
     ) -> [String: String] {
         var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") && !$0.key.hasPrefix("WINE") }
         env["WINEPREFIX"] = prefix.path
@@ -18,6 +18,11 @@ public enum Launcher {
         if settings.fastSync { env["WINEMSYNC"] = "1" }
         if settings.performanceHUD { env["MTL_HUD_ENABLED"] = "1" }
         if let libraryFallback { env["DYLD_FALLBACK_LIBRARY_PATH"] = libraryFallback }
+        // LC_ALL is the one variable every engine reads its Windows language (and codepage) from;
+        // Apple's and CrossOver's older Wine ignore LC_CTYPE on its own.
+        if let language = WindowsLanguage.resolve(settings.language, preferred: preferredLanguages) {
+            env["LC_ALL"] = language.locale + ".UTF-8"
+        }
         if engine == .gptk {
             // Apple's Wine predates MSync in some builds; ESync is what Apple's own instructions use.
             if settings.fastSync { env["WINEESYNC"] = "1" }
@@ -151,6 +156,9 @@ public enum Launcher {
             if character == "\"" {
                 quoted.toggle()
                 hasToken = true
+            } else if character == "\0" {
+                // Shortcuts written by some installers carry stray NULs; an argument can't hold one.
+                continue
             } else if character.isWhitespace && !quoted {
                 if hasToken { result.append(current) }
                 current = ""

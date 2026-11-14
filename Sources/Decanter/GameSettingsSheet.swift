@@ -10,6 +10,8 @@ struct GameSettingsSheet: View {
     @State var game: Game
     @State private var tab = Tab.info
     @State private var searchingCover = false
+    /// Set when the game's program is a launcher menu that Decanter knows how to skip.
+    @State private var directStart: LauncherDetector.DirectStart?
 
     private enum Tab: String, CaseIterable, Identifiable {
         case info = "Game Info", options = "Game Options", graphics = "Graphics", system = "System"
@@ -52,6 +54,9 @@ struct GameSettingsSheet: View {
         }
         .frame(width: 640, height: 600)
         .sheet(isPresented: $searchingCover) { CoverSearchSheet(game: game) }
+        .task(id: game.executablePath) {
+            directStart = LauncherDetector.directStart(for: URL(fileURLWithPath: game.executablePath))
+        }
     }
 
     // MARK: Game info
@@ -128,6 +133,17 @@ struct GameSettingsSheet: View {
                     Label("This file is missing. Was the game moved or its drive unplugged?",
                           systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
+                }
+                if let directStart {
+                    LabeledContent {
+                        Button("Skip the Launcher") {
+                            game.executablePath = directStart.executable.path
+                            game.settings.arguments = directStart.arguments
+                        }
+                    } label: {
+                        Text("This program is the game's launcher")
+                        Text("Decanter can start the game itself instead. Change the program back to reach the launcher's options.")
+                    }
                 }
                 TextField("Arguments", text: $game.settings.arguments, prompt: Text("e.g. -windowed"))
                 LabeledContent("Working folder") {
@@ -269,6 +285,17 @@ struct GameSettingsSheet: View {
                 TextField("DLL overrides", text: $game.settings.dllOverrides, prompt: Text("e.g. dinput8=n,b;d3d9=n"))
                 Text("Makes Wine prefer a DLL shipped with the game or a mod (n) over its own (b). Many mod loaders need this.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Picker("Windows language", selection: $game.settings.language) {
+                    Text("Automatic (\(WindowsLanguage.automatic()?.name ?? "same as this Mac"))").tag("")
+                    Divider()
+                    ForEach(WindowsLanguage.all) { Text($0.name).tag($0.locale) }
+                }
+            } header: {
+                Text("Language")
+            } footer: {
+                Text("Older games store text in their language's own encoding. If letters come out as symbols like Çàïóñê, choose the language the game was made in.")
             }
             Section {
                 TextEditor(text: $game.settings.environment)

@@ -223,7 +223,9 @@ final class DecanterCoreTests: XCTestCase {
     }
 
     /// A shortcut as Windows writes it: ID list, link info with an ANSI path, Unicode strings.
-    private func makeShortcut(target: String, arguments: String = "", workingDirectory: String = "") -> Data {
+    private func makeShortcut(
+        target: String, arguments: String = "", workingDirectory: String = "", targetBytes: [UInt8]? = nil
+    ) -> Data {
         func le(_ value: Int, _ width: Int) -> [UInt8] { (0..<width).map { UInt8((value >> (8 * $0)) & 0xFF) } }
         func counted(_ string: String) -> [UInt8] {
             le(string.utf16.count, 2) + string.utf16.flatMap { le(Int($0), 2) }
@@ -234,7 +236,7 @@ final class DecanterCoreTests: XCTestCase {
         var bytes = le(0x4C, 4) + [0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46] + le(flags, 4)
         bytes += [UInt8](repeating: 0, count: 0x4C - bytes.count)
         bytes += le(6, 2) + [4, 0, 0xAA, 0xBB, 0, 0]  // ID list: one opaque item and the terminator
-        let path = Array(target.utf8) + [0]
+        let path = (targetBytes ?? Array(target.utf8)) + [0]
         let header = 0x1C
         bytes += le(header + path.count + 1, 4) + le(header, 4) + le(1, 4) + le(0, 4)
             + le(header, 4) + le(0, 4) + le(header + path.count, 4) + path + [0]
@@ -251,6 +253,76 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(shortcut.workingDirectory, #"C:\Program Files\Foo"#)
         XCTAssertNil(WindowsShortcut(data: Data("not a shortcut".utf8)))
         XCTAssertNil(WindowsShortcut(data: makeShortcut(target: #"C:\a.exe"#).prefix(0x60)))
+    }
+
+    func testShortcutTextInTheUsersCodepage() throws {
+        // "C:\Игра\a.exe" as a Russian installer writes it: one byte per letter, codepage 1251.
+        let path: [UInt8] = Array(#"C:\"#.utf8) + [0xC8, 0xE3, 0xF0, 0xE0] + Array(#"\a.exe"#.utf8)
+        let data = makeShortcut(target: "", arguments: "\0", targetBytes: path)
+        let russian = try XCTUnwrap(WindowsShortcut(data: data, preferredLanguages: ["en-US", "uk-UA"]))
+        XCTAssertEqual(russian.target, #"C:\Игра\a.exe"#)
+        // Some installers write an argument string holding nothing but a NUL.
+        XCTAssertEqual(russian.arguments, "")
+        let western = try XCTUnwrap(WindowsShortcut(data: data, preferredLanguages: ["en-US"]))
+        XCTAssertEqual(western.target, #"C:\Èãðà\a.exe"#)
+        XCTAssertEqual(Launcher.splitArguments("\0"), [])
+        XCTAssertEqual(Launcher.splitArguments("-a\0 -b"), ["-a", "-b"])
+    }
+
+    func testWindowsLanguageFollowsTheMacsLanguages() {
+        XCTAssertEqual(WindowsLanguage.automatic(preferred: ["en-US", "uk-UA"])?.locale, "uk_UA")
+        XCTAssertEqual(WindowsLanguage.automatic(preferred: ["ru"])?.codepage, 1251)
+        XCTAssertEqual(WindowsLanguage.automatic(preferred: ["zh-Hant-TW"])?.locale, "zh_TW")
+        XCTAssertEqual(WindowsLanguage.automatic(preferred: ["zh-Hans-CN"])?.locale, "zh_CN")
+        XCTAssertNil(WindowsLanguage.automatic(preferred: ["en-US", "fr-FR"]))
+        XCTAssertEqual(WindowsLanguage.resolve("ja_JP", preferred: ["ru-RU"])?.locale, "ja_JP")
+
+        var settings = GameSettings()
+        let prefix = URL(fileURLWithPath: "/p")
+        XCTAssertEqual(Launcher.environment(prefix: prefix, settings: settings, preferredLanguages: ["en-US", "uk-UA"])["LC_ALL"],
+                       "uk_UA.UTF-8")
+        settings.language = "en_US"
+        XCTAssertEqual(Launcher.environment(prefix: prefix, settings: settings, preferredLanguages: ["ru-RU"])["LC_ALL"],
+                       "en_US.UTF-8")
+        settings.language = "ru_RU"
+        settings.environment = "LC_ALL=C"
+        XCTAssertEqual(Launcher.environment(prefix: prefix, settings: settings, preferredLanguages: [])["LC_ALL"], "C")
+    }
+
+    func testShortcutToALithTechLauncherStartsTheGame() throws {
+        let folder = try temporaryFolder()
+        let template = try makePrefix(in: folder, named: "template", files: [])
+        let prefix = try makePrefix(in: folder, named: "bottle", files: [
+            "Games/AvP2/Avp2.exe", "Games/AvP2/Lithtech.exe", "Games/AvP2/avp2cmds.txt",
+            "Games/Other/Play.exe", "Games/Other/Lithtech.exe", "users/me/Desktop/placeholder",
+        ])
+        let game = prefix.appendingPathComponent("drive_c/Games/AvP2")
+        try (Data("MZ\0LITHTECH.EXE\0\\lithtech.exe -cmdfile AVP2cmds.txt\0more".utf8))
+            .write(to: game.appendingPathComponent("Avp2.exe"))
+        let direct = try XCTUnwrap(LauncherDetector.directStart(for: game.appendingPathComponent("Avp2.exe")))
+        XCTAssertEqual(direct.executable.lastPathComponent, "Lithtech.exe")
+        XCTAssertEqual(direct.arguments, "-cmdfile avp2cmds.txt")
+        XCTAssertNil(LauncherDetector.directStart(for: game.appendingPathComponent("Lithtech.exe")))
+        // Names the engine but not how it is started, or the command file is missing: left alone.
+        let other = prefix.appendingPathComponent("drive_c/Games/Other/Play.exe")
+        XCTAssertNil(LauncherDetector.directStart(for: other))
+        try Data("lithtech.exe -cmdfile gone.txt".utf8).write(to: other)
+        XCTAssertNil(LauncherDetector.directStart(for: other))
+
+        let startMenu = prefix.appendingPathComponent("drive_c/ProgramData/Microsoft/Windows/Start Menu/Programs")
+        try FileManager.default.createDirectory(at: startMenu, withIntermediateDirectories: true)
+        try makeShortcut(target: #"C:\Games\AvP2\Avp2.exe"#).write(to: startMenu.appendingPathComponent("AvP 2.lnk"))
+        // Installers usually add a desktop shortcut to the same launcher.
+        try makeShortcut(target: #"C:\Games\AvP2\Avp2.exe"#)
+            .write(to: prefix.appendingPathComponent("drive_c/users/me/Desktop/AvP 2.lnk"))
+        let programs = GameInstaller.installedPrograms(prefix: prefix, templatePrefix: template)
+        let choice = try XCTUnwrap(GameInstaller.obviousChoice(among: programs))
+        XCTAssertEqual(choice.name, "AvP 2")
+        XCTAssertEqual(choice.executable.lastPathComponent, "Lithtech.exe")
+        XCTAssertEqual(choice.arguments, "-cmdfile avp2cmds.txt")
+        // The launcher is still offered, once, and the engine isn't listed a second time.
+        XCTAssertEqual(programs.filter { $0.executable.path.contains("AvP2") }.map(\.executable.lastPathComponent),
+                       ["Lithtech.exe", "Avp2.exe"])
     }
 
     private func temporaryFolder() throws -> URL {
