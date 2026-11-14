@@ -30,6 +30,13 @@ fixes does both. Games started from Steam run on Steam's engine, so it gets the 
 main Wine for DirectX 10/11. Confirmed so far: signing in, downloading, and a DirectX 11 game (Rise of
 Nations: Extended Edition) reaching its menu.
 
+**Steam games.** Decanter reads the Steam client's own files in each bottle (`steamapps/appmanifest_*.acf`,
+in every library folder) and, when Steam has finished downloading a game the library lacks, offers it in a
+banner above the library: *Add*, *Choose…* or dismiss. A game added this way is started through Steam
+(`steam.exe -applaunch <id>` in Steam's bottle), shows the cover Steam already downloaded, and falls back
+to the icon of the game's own program rather than Steam's. Dismissed or removed games aren't offered again
+until **+ → Find Steam Games**.
+
 **Bottles.** A bottle is a named Windows environment that any number of games share, so patches, add-ons
 and multi-disc installers find what is already installed. Everything goes in the default bottle unless you
 pick another in the install sheet. **+ → Manage Bottles…** creates, renames and deletes bottles, sets the

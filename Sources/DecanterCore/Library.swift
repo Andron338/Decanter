@@ -75,6 +75,10 @@ public struct Game: Codable, Identifiable, Equatable {
     public var added: Date?
     /// An automatic cover lookup has been tried, so it isn't repeated on every launch.
     public var coverLookedUp: Bool?
+    /// Set for a game the Steam client in its bottle starts: `executablePath` is then `steam.exe`.
+    public var steamAppID: Int?
+    /// The program whose icon stands for the game, when that isn't the one that starts it.
+    public var iconPath: String?
 
     public init(name: String, executablePath: String, bottleID: UUID) {
         self.name = name

@@ -17,6 +17,10 @@ struct DecanterApp: App {
                 .frame(minWidth: 720, minHeight: 480)
                 .onAppear { NSApp.activate(ignoringOtherApps: true) }
                 .onOpenURL { model.add($0) }
+                // Coming back from Steam is when it is likely to have finished a download.
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    model.findSteamGames()
+                }
         }
         .defaultSize(width: 960, height: 640)
         .commands { CommandGroup(replacing: .newItem) {} }

@@ -33,6 +33,12 @@ public struct CoverCandidate: Identifiable, Equatable, Sendable {
     public let name: String
     public let thumbnail: URL?
 
+    public init(id: Int, name: String, thumbnail: URL? = nil) {
+        self.id = id
+        self.name = name
+        self.thumbnail = thumbnail
+    }
+
     /// Portrait cover first; older catalogue entries only have the landscape banner.
     public var imageURLs: [URL] {
         ["library_600x900_2x.jpg", "library_600x900.jpg", "header.jpg"].compactMap {

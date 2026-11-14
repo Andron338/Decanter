@@ -491,6 +491,56 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertNil(GameInstaller.resolve(windowsPath: #"C:\GOG Games\Missing\x.exe"#, prefix: prefix))
     }
 
+    func testSteamLibraryListsFinishedGames() throws {
+        let folder = try temporaryFolder()
+        let prefix = try makePrefix(in: folder, named: "steam", files: [
+            "Program Files (x86)/Steam/steam.exe",
+            "Program Files (x86)/Steam/steamapps/common/Foo Game/redist/vcredist_x86.exe",
+            "Program Files (x86)/Steam/steamapps/common/Foo Game/bin/foo.exe",
+            "Program Files (x86)/Steam/steamapps/common/Half Done/half.exe",
+            "Program Files (x86)/Steam/steamapps/common/Steamworks Shared/placeholder",
+            "Program Files (x86)/Steam/appcache/librarycache/10/abc/library_600x900.jpg",
+            "Program Files (x86)/Steam/appcache/librarycache/10/header.jpg",
+            "Other Library/steamapps/common/Bar/bar.exe",
+        ])
+        let steamapps = prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam/steamapps")
+        func manifest(_ id: Int, _ name: String, _ dir: String, flags: Int = 4) -> String {
+            "\"AppState\"\n{\n\t\"appid\"\t\t\"\(id)\"\n\t\"name\"\t\t\"\(name)\"\n\t\"StateFlags\"\t\t\"\(flags)\"\n"
+                + "\t\"installdir\"\t\t\"\(dir)\"\n\t\"UserConfig\"\n\t{\n\t\t\"language\"\t\t\"english\"\n\t}\n}\n"
+        }
+        try manifest(10, "Foo: The \\\"Game\\\"", "Foo Game").write(to: steamapps.appendingPathComponent("appmanifest_10.acf"), atomically: true, encoding: .utf8)
+        // Still downloading, a tool, and one whose files were deleted behind Steam's back.
+        try manifest(20, "Half Done", "Half Done", flags: 1026).write(to: steamapps.appendingPathComponent("appmanifest_20.acf"), atomically: true, encoding: .utf8)
+        try manifest(228980, "Steamworks Common Redistributables", "Steamworks Shared").write(to: steamapps.appendingPathComponent("appmanifest_228980.acf"), atomically: true, encoding: .utf8)
+        try manifest(30, "Gone", "Gone").write(to: steamapps.appendingPathComponent("appmanifest_30.acf"), atomically: true, encoding: .utf8)
+        // A second library on the same drive, spelled the way Steam writes Windows paths.
+        try "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\"\n\t}\n\t\"1\"\n\t{\n\t\t\"path\"\t\t\"C:\\\\other library\"\n\t}\n}\n"
+            .write(to: steamapps.appendingPathComponent("libraryfolders.vdf"), atomically: true, encoding: .utf8)
+        try manifest(40, "Bar", "Bar").write(to: prefix.appendingPathComponent("drive_c/Other Library/steamapps/appmanifest_40.acf"), atomically: true, encoding: .utf8)
+
+        let clients = SteamLibrary.clients(in: prefix)
+        XCTAssertEqual(clients.map(\.lastPathComponent), ["steam.exe"])
+        let apps = SteamLibrary.apps(client: clients[0], prefix: prefix)
+        XCTAssertEqual(apps.map(\.appID), [40, 10])
+        XCTAssertEqual(apps.map(\.name), ["Bar", "Foo: The \"Game\""])
+        XCTAssertEqual(apps[1].launchArguments, "-applaunch 10")
+        XCTAssertEqual(apps[1].client, clients[0])
+        // The game's program, not the redistributable beside it; the portrait cover, wherever it is kept.
+        XCTAssertEqual(apps[1].mainProgram()?.lastPathComponent, "foo.exe")
+        XCTAssertEqual(apps[1].cachedCover?.lastPathComponent, "library_600x900.jpg")
+        XCTAssertNil(apps[0].cachedCover)
+        XCTAssertTrue(SteamLibrary.clients(in: try makePrefix(in: folder, named: "plain", files: ["Games/x.exe"])).isEmpty)
+    }
+
+    func testVDFParsing() {
+        let parsed = VDF.parse("// comment\n\"Root\"\n{\n\t\"Key\"\t\"a \\\\ b\"\n\tbare value\n\t\"Inner\" { \"x\" \"1\" }\n}")
+        XCTAssertEqual(parsed["root"]?["KEY"]?.text, "a \\ b")
+        XCTAssertEqual(parsed["root"]?["bare"]?.text, "value")
+        XCTAssertEqual(parsed["root"]?["inner"]?["x"]?.text, "1")
+        XCTAssertNil(parsed["root"]?["missing"])
+        XCTAssertEqual(VDF.parse("\"unterminated\" {"), .object(["unterminated": .object([:])]))
+    }
+
     func testPlainShortcutWinsOverVariantsOfTheSameProgram() throws {
         let folder = try temporaryFolder()
         let template = try makePrefix(in: folder, named: "template", files: [])
