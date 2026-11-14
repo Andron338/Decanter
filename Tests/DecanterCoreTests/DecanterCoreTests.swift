@@ -127,6 +127,80 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(plan.arguments, [
             "explorer", "/desktop=Decanter,1280x720", #"Z:\Games\My Game\x.exe"#, "-windowed", "-name", "John Doe",
         ])
+
+        // "Match screen" becomes the main screen's size when the game starts.
+        game.settings.virtualDesktopSize = Launcher.screenSizedDesktop
+        XCTAssertEqual(Launcher.desktopSize(game.settings, screen: (1800, 1169)), "1800x1169")
+        let size = Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments[1].dropFirst("/desktop=Decanter,".count)
+        XCTAssertEqual(size.split(separator: "x").compactMap { Int($0) }.count, 2, "always a real size, with or without a screen")
+    }
+
+    @MainActor
+    func testScaledFullscreenOffersClassicResolutionsUpToTheScreensPixels() {
+        typealias Size = ScaledFullscreen.Size
+        let modes = ScaledFullscreen.modes(desktop: Size(width: 1800, height: 1169), panel: Size(width: 3024, height: 1964))
+        XCTAssertEqual(modes.first, Size(width: 1800, height: 1169), "the desktop's own size is where the screen starts")
+        XCTAssertTrue(modes.contains(Size(width: 800, height: 600)))
+        XCTAssertTrue(modes.contains(Size(width: 2560, height: 1600)))
+        // A screen with few pixels offers nothing larger than itself, and its own size only once.
+        let small = ScaledFullscreen.modes(desktop: Size(width: 1280, height: 800), panel: Size(width: 1280, height: 800))
+        XCTAssertFalse(small.contains(Size(width: 1280, height: 960)))
+        XCTAssertEqual(small.filter { $0 == Size(width: 1280, height: 800) }.count, 1)
+    }
+
+    func testScaledFullscreenTakesThePlaceOfTheFixedSizeWindow() {
+        var game = Game(name: "G", executablePath: "/Games/g.exe", bottleID: UUID())
+        game.settings.virtualDesktop = true
+        game.settings.scaledFullscreen = true
+        let plan = Launcher.plan(game: game, prefix: URL(fileURLWithPath: "/prefix"), runtime: runtime)
+        XCTAssertEqual(plan.arguments, ["/Games/g.exe"])
+    }
+
+    func testFillScreenPicksTheSmallestResolutionTheWindowFitsOn() {
+        typealias Size = DisplayFit.Size
+        // A 14-inch MacBook Pro's modes: none is 4:3.
+        let modes = [(960, 600), (1024, 665), (1147, 745), (1280, 800), (1352, 878), (1512, 982), (1800, 1169), (3024, 1964)]
+            .map { Size(width: $0.0, height: $0.1) }
+        XCTAssertEqual(DisplayFit.bestMode(for: Size(width: 1024, height: 768), among: modes), Size(width: 1280, height: 800))
+        XCTAssertEqual(DisplayFit.bestMode(for: Size(width: 800, height: 600), among: modes), Size(width: 1024, height: 665))
+        // 1512x982 leaves no room for the menu bar above a 960-point window.
+        XCTAssertEqual(DisplayFit.bestMode(for: Size(width: 1280, height: 960), among: modes), Size(width: 1800, height: 1169))
+        XCTAssertNil(DisplayFit.bestMode(for: Size(width: 4000, height: 3000), among: modes))
+        XCTAssertEqual(Size("1024x768"), Size(width: 1024, height: 768))
+        XCTAssertNil(Size(Launcher.screenSizedDesktop))
+        XCTAssertEqual(Size(width: 1280, height: 800).text, "1280x800")
+    }
+
+    func testSteamDownloadMustBeAWindowsProgram() throws {
+        let folder = try temporaryFolder()
+        let page = folder.appendingPathComponent("SteamSetup.exe")
+        try Data("<html>Sign in to this network</html>".utf8).write(to: page)
+        XCTAssertFalse(SteamInstaller.isWindowsProgram(page))
+        try makePE(is64Bit: false, imports: ["KERNEL32.dll"]).write(to: page)
+        XCTAssertTrue(SteamInstaller.isWindowsProgram(page))
+        XCTAssertEqual(SteamInstaller.source.scheme, "https")
+        XCTAssertEqual(SteamInstaller.destination.lastPathComponent, "SteamSetup.exe")
+    }
+
+    func testSteamRunsOnTheSikarugirEngine() {
+        var runtime = InstalledRuntime(wineTag: "11.0", basePath: "/rt/wine")
+        // Not downloaded yet: fall back to the main Wine rather than point at nothing.
+        XCTAssertFalse(runtime.has(.sikarugir))
+        XCTAssertEqual(runtime.engine(for: .sikarugir), .wine)
+        runtime.sikarugirPath = "/rt/sk"
+        XCTAssertEqual(runtime.engine(for: .sikarugir), .sikarugir)
+        XCTAssertEqual(runtime.wine(for: .sikarugir).path, "/rt/sk/bin/wine")
+        // The archive has no support libraries of its own; the main Wine's are borrowed.
+        XCTAssertEqual(runtime.libraryFallback(for: .sikarugir), "/rt/sk/lib:/rt/wine/lib:/usr/local/lib:/usr/lib")
+        XCTAssertNil(runtime.libraryFallback(for: .wine))
+        XCTAssertEqual(GameInstaller.renderer(for: SteamInstaller.engine), .sikarugir)
+        // An engine installed before it got DXMT is topped up, but only when DXMT itself is installed.
+        XCTAssertFalse(runtime.sikarugirLacksDXMT)
+        runtime.dxmtTag = "v0.80"
+        XCTAssertTrue(runtime.sikarugirLacksDXMT)
+        runtime.sikarugirPath = "/rt/sk-10.0_8+dxmt-v0.80/wswine.bundle"
+        XCTAssertFalse(runtime.sikarugirLacksDXMT)
+        XCTAssertEqual(BottleStore.templatePrefix(.sikarugir).lastPathComponent, "sk-prefix")
     }
 
     func testMsiGoesThroughMsiexec() {
@@ -415,6 +489,31 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(GameInstaller.obviousChoice(among: programs), programs[0])
         XCTAssertNil(GameInstaller.obviousChoice(among: Array(programs.dropFirst()) + [programs[1]]))
         XCTAssertNil(GameInstaller.resolve(windowsPath: #"C:\GOG Games\Missing\x.exe"#, prefix: prefix))
+    }
+
+    func testPlainShortcutWinsOverVariantsOfTheSameProgram() throws {
+        let folder = try temporaryFolder()
+        let template = try makePrefix(in: folder, named: "template", files: [])
+        let prefix = try makePrefix(in: folder, named: "bottle", files: [
+            "EA/Carbon/nfsc.exe", "EA/Carbon/nfs_inst.exe", "EA/Carbon/nfs_uninst.exe", "EA/Carbon/against.exe",
+        ])
+        let startMenu = prefix.appendingPathComponent("drive_c/ProgramData/Microsoft/Windows/Start Menu/Programs/Carbon")
+        try FileManager.default.createDirectory(at: startMenu, withIntermediateDirectories: true)
+        // "Carbon Safemode.lnk" sorts before "Carbon.lnk", and the installer spells the target differently.
+        try makeShortcut(target: #"C:\EA\Carbon\nfsc.exe"#, arguments: "/s").write(to: startMenu.appendingPathComponent("Carbon Safemode.lnk"))
+        try makeShortcut(target: #"C:\EA\Carbon\NFSC.exe"#).write(to: startMenu.appendingPathComponent("Carbon.lnk"))
+
+        let programs = GameInstaller.installedPrograms(prefix: prefix, since: .take(prefix: template))
+        XCTAssertEqual(programs.map(\.name), ["Carbon", "Carbon"])
+        XCTAssertEqual(programs.map(\.executable.lastPathComponent), ["nfsc.exe", "against.exe"])
+        XCTAssertEqual(programs[0].arguments, "")
+        XCTAssertEqual(GameInstaller.obviousChoice(among: programs), programs[0])
+
+        // With only the variant, its arguments are kept.
+        try FileManager.default.removeItem(at: startMenu.appendingPathComponent("Carbon.lnk"))
+        let variant = GameInstaller.installedPrograms(prefix: prefix, since: .take(prefix: template))
+        XCTAssertEqual(variant.first?.name, "Carbon Safemode")
+        XCTAssertEqual(variant.first?.arguments, "/s")
     }
 
     func testInstallingIntoASharedBottleOnlyOffersWhatIsNew() throws {

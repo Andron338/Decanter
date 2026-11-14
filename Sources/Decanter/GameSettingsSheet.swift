@@ -219,6 +219,7 @@ struct GameSettingsSheet: View {
                     Text("Metal — DXMT (DirectX 10/11)").tag(Renderer.metal)
                     Text("D3DMetal — Apple (DirectX 11/12)").tag(Renderer.d3dmetal)
                     Text("CrossOver engine (DirectX 9 and older, 32-bit)").tag(Renderer.crossover)
+                    Text("Wine 10 (Steam)").tag(Renderer.sikarugir)
                     Text("Wine 11 built-in").tag(Renderer.wine)
                 }
                 if game.settings.renderer == .crossover {
@@ -244,13 +245,33 @@ struct GameSettingsSheet: View {
                 Text("If a game shows a black screen or quits at launch, try another renderer.")
             }
             Section("Display") {
+                Toggle(isOn: $game.settings.scaledFullscreen) {
+                    Text("Scaled fullscreen")
+                    Text("For games stuck in a small window: lets the game use resolutions this Mac's screen "
+                         + "doesn't have, such as 800x600 or 1024x768, stretched to the whole screen with black "
+                         + "bars at the sides. The Mac's screen looks softer while the game runs.")
+                }
                 Toggle(isOn: $game.settings.virtualDesktop) {
                     Text("Run in a fixed-size window")
                     Text("Fixes older games that crash when switching to fullscreen.")
                 }
-                if game.settings.virtualDesktop {
-                    Picker("Window size", selection: $game.settings.virtualDesktopSize) {
+                .disabled(game.settings.scaledFullscreen)
+                if game.settings.virtualDesktop && !game.settings.scaledFullscreen {
+                    Picker(selection: $game.settings.virtualDesktopSize) {
+                        Text("Match screen").tag(Launcher.screenSizedDesktop)
                         ForEach(["1024x768", "1280x720", "1440x900", "1920x1080", "2560x1440"], id: \.self) { Text($0) }
+                    } label: {
+                        Text("Largest window size")
+                        Text("The window takes the resolution the game is set to, up to this size. "
+                             + "To make it bigger, raise the resolution in the game's own video options.")
+                    }
+                    if game.settings.virtualDesktopSize != Launcher.screenSizedDesktop {
+                        Toggle(isOn: $game.settings.fillScreen) {
+                            Text("Fill the screen")
+                            Text("Lowers the Mac's resolution while the game runs, so a window of this size nearly "
+                                 + "fills the screen. Set the game to this resolution in its video options.")
+                        }
+                        .disabled(game.settings.retina)
                     }
                 }
                 Toggle("High-resolution (Retina) rendering", isOn: $game.settings.retina)

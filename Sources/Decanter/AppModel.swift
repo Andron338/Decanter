@@ -16,6 +16,8 @@ struct InstallRequest: Identifiable {
     let kind: InstallerKind?
     /// The bottle to offer first; the default one when nil.
     var bottleID: UUID?
+    /// Offer a new bottle with this name instead, unless one already has it.
+    var newBottleName: String?
 }
 
 /// Where an installer should run.
@@ -61,6 +63,8 @@ final class AppModel {
     var busyMessage: String?
     var errorMessage: String?
     var running: Set<UUID> = []
+    /// Games that lowered the screen resolution to fill it; the last one to quit restores it.
+    private var fillingScreen: Set<UUID> = []
     var installerResult: InstallerResult?
     var installRequest: InstallRequest?
     var activeInstall: ActiveInstall?
@@ -181,6 +185,23 @@ final class AppModel {
         guard runtime != nil, isWindowsProgram(url) else { return }
         installRequest = InstallRequest(installer: url, kind: InstallerDetector.kind(of: url),
                                         bottleID: bottleID ?? sharedBottle().id)
+    }
+
+    /// Downloads Valve's installer for the Windows Steam client and offers to run it, in a bottle of
+    /// its own unless there already is a Steam bottle.
+    func installSteam() {
+        guard runtime != nil, busyMessage == nil else { return }
+        busyMessage = "Downloading the Steam installer…"
+        Task {
+            defer { busyMessage = nil }
+            do {
+                let file = try await SteamInstaller.download()
+                installRequest = InstallRequest(installer: file, kind: InstallerDetector.kind(of: file),
+                                                bottleID: nil, newBottleName: SteamInstaller.bottleName)
+            } catch {
+                errorMessage = "Couldn't download Steam: \(error.localizedDescription)"
+            }
+        }
     }
 
     /// Runs an installer in a bottle, then adds what it installed to the library. With nothing chosen
@@ -485,6 +506,19 @@ final class AppModel {
             }
             self.runtime = runtime
         }
+        if renderer == .sikarugir && (!runtime.hasSikarugir || runtime.sikarugirLacksDXMT) {
+            let previous = busyMessage
+            busyMessage = runtime.hasSikarugir ? "Updating the engine for Steam…" : "Getting the engine for Steam (about 160 MB, one time)…"
+            defer { busyMessage = previous }
+            runtime = try await RuntimeManager.installSikarugir(into: runtime) { progress in
+                Task { @MainActor in
+                    guard self.busyMessage != nil else { return }
+                    let percent = progress.fraction.map { " \(Int($0 * 100))%" } ?? ""
+                    self.busyMessage = progress.stage + percent
+                }
+            }
+            self.runtime = runtime
+        }
         return runtime
     }
 
@@ -512,16 +546,43 @@ final class AppModel {
                     LibraryStore.save(games)
                 }
                 await Launcher.applyRegistrySettings(game: game, prefix: prefix, runtime: runtime)
+                // Fill the screen: the Mac drops to the resolution that best fits the window, and the
+                // Windows desktop takes that size, leaving the game's own resolution to size the window.
+                var launched = game
+                var filled = false
+                // Scaled fullscreen: a virtual screen with the resolutions old games ask for stands
+                // in for the real one, which mirrors it. If it can't be made the game runs as before.
+                let scaled = game.settings.scaledFullscreen ? await ScaledFullscreen.begin() : false
+                if !scaled { launched.settings.scaledFullscreen = false }
+                if !scaled, game.settings.virtualDesktop, game.settings.fillScreen, !game.settings.retina,
+                   let window = DisplayFit.Size(game.settings.virtualDesktopSize),
+                   let screen = DisplayFit.apply(for: window) {
+                    launched.settings.virtualDesktopSize = screen.text
+                    filled = true
+                    fillingScreen.insert(id)
+                }
                 let started = Date()
-                _ = try Launcher.start(Launcher.plan(game: game, prefix: prefix, runtime: runtime), log: logURL(for: game)) { status in
-                    Task { @MainActor in
-                        self.running.remove(id)
-                        self.addPlayTime(Date().timeIntervalSince(started), to: id)
-                        if status != 0 && Date().timeIntervalSince(started) < 10 {
-                            self.errorMessage = "\(game.name) quit right after starting. "
-                                + "Open its settings to try a different renderer or a fixed-size window, or check the log."
+                let restoreScreen = {
+                    if scaled { ScaledFullscreen.end() }
+                    guard filled else { return }
+                    self.fillingScreen.remove(id)
+                    if self.fillingScreen.isEmpty { DisplayFit.restore() }
+                }
+                do {
+                    _ = try Launcher.start(Launcher.plan(game: launched, prefix: prefix, runtime: runtime), log: logURL(for: game)) { status in
+                        Task { @MainActor in
+                            restoreScreen()
+                            self.running.remove(id)
+                            self.addPlayTime(Date().timeIntervalSince(started), to: id)
+                            if status != 0 && Date().timeIntervalSince(started) < 10 {
+                                self.errorMessage = "\(game.name) quit right after starting. "
+                                    + "Open its settings to try a different renderer or a fixed-size window, or check the log."
+                            }
                         }
                     }
+                } catch {
+                    restoreScreen()
+                    throw error
                 }
             } catch {
                 running.remove(id)

@@ -34,6 +34,7 @@ struct InstallSheet: View {
             Picker("Install for", selection: $engine) {
                 Text("Modern games (DirectX 10 and newer)").tag(Engine.wine)
                 Text("Older games (DirectX 9 and earlier, 32-bit)").tag(Engine.crossover)
+                Text("Steam (Wine 10)").tag(Engine.sikarugir)
                 if model.runtime?.hasD3DMetal == true {
                     Text("DirectX 12 games (D3DMetal)").tag(Engine.gptk)
                 }
@@ -59,8 +60,15 @@ struct InstallSheet: View {
         .padding(20)
         .frame(width: 480)
         .onAppear {
-            bottleID = request.bottleID ?? model.defaultBottleID
-            newName = GameNaming.displayName(for: request.installer)
+            if let name = request.newBottleName {
+                // Its own bottle, or the one an earlier install with this name made.
+                bottleID = model.bottles.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.id
+                newName = name
+                engine = SteamInstaller.engine
+            } else {
+                bottleID = request.bottleID ?? model.defaultBottleID
+                newName = GameNaming.displayName(for: request.installer)
+            }
             followBottle()
         }
         .onChange(of: bottleID) { followBottle() }
@@ -90,6 +98,10 @@ struct InstallSheet: View {
             return model.runtime?.hasCrossOver == true
                 ? "Runs on CrossOver's Wine 9, which also suits installers that crash on Wine 11."
                 : "Runs on CrossOver's Wine 9, which also suits installers that crash on Wine 11. Decanter downloads it first (about 165 MB)."
+        case .sikarugir:
+            return model.runtime?.hasSikarugir == true
+                ? "Runs on Wine 10 with CrossOver's fixes, the engine the Steam client needs."
+                : "Runs on Wine 10 with CrossOver's fixes, the engine the Steam client needs. Decanter downloads it first (about 160 MB)."
         case .gptk:
             return "Runs on Apple's Wine, so the game is installed where D3DMetal can use it."
         }
@@ -169,6 +181,7 @@ extension Engine {
         switch self {
         case .wine: return "modern games (Wine 11)"
         case .crossover: return "older games (CrossOver)"
+        case .sikarugir: return "Steam (Wine 10)"
         case .gptk: return "DirectX 12 games (D3DMetal)"
         }
     }

@@ -321,6 +321,7 @@ struct LibraryView: View {
                     .keyboardShortcut("o")
                 Button("Install from Installer…") { chooseFile(installer: true) }
                     .keyboardShortcut("i")
+                Button("Install Steam…") { model.installSteam() }
                 Divider()
                 Button("Manage Bottles…") { model.managingBottles = true }
                     .keyboardShortcut("b")

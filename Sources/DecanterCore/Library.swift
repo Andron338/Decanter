@@ -5,6 +5,12 @@ public struct GameSettings: Codable, Equatable {
     /// Run inside a fixed-size Wine desktop. Fixes old games that crash on fullscreen mode switches.
     public var virtualDesktop = false
     public var virtualDesktopSize = "1440x900"
+    /// With a fixed-size window: lower the Mac's screen resolution while the game runs, so the
+    /// window nearly fills the screen.
+    public var fillScreen = false
+    /// Let the game switch to resolutions the Mac's screen doesn't have, scaled to the whole screen.
+    /// See `ScaledFullscreen`. Takes the place of the fixed-size window.
+    public var scaledFullscreen = false
     public var retina = false
     public var fastSync = true
     public var performanceHUD = false
@@ -31,6 +37,8 @@ public struct GameSettings: Codable, Equatable {
         renderer = (try? c.decodeIfPresent(Renderer.self, forKey: .renderer)) ?? d.renderer
         virtualDesktop = try c.decodeIfPresent(Bool.self, forKey: .virtualDesktop) ?? d.virtualDesktop
         virtualDesktopSize = try c.decodeIfPresent(String.self, forKey: .virtualDesktopSize) ?? d.virtualDesktopSize
+        fillScreen = try c.decodeIfPresent(Bool.self, forKey: .fillScreen) ?? d.fillScreen
+        scaledFullscreen = try c.decodeIfPresent(Bool.self, forKey: .scaledFullscreen) ?? d.scaledFullscreen
         retina = try c.decodeIfPresent(Bool.self, forKey: .retina) ?? d.retina
         fastSync = try c.decodeIfPresent(Bool.self, forKey: .fastSync) ?? d.fastSync
         performanceHUD = try c.decodeIfPresent(Bool.self, forKey: .performanceHUD) ?? d.performanceHUD
@@ -214,6 +222,7 @@ public enum BottleStore {
         case .wine: name = "prefix"
         case .gptk: name = "gptk-prefix"
         case .crossover: name = "cx-prefix"
+        case .sikarugir: name = "sk-prefix"
         }
         return Paths.template.appendingPathComponent(name, isDirectory: true)
     }
@@ -302,7 +311,10 @@ public enum GameNaming {
         let stem = url.deletingPathExtension().lastPathComponent.lowercased()
         let helpers = ["unins", "crash", "redist", "vcredist", "dxsetup", "dotnet", "directx", "setup",
                        "install", "updater", "helper", "report", "cefprocess", "webhelper", "ue4prereq"]
-        return helpers.contains { stem.contains($0) }
+        if helpers.contains(where: { stem.contains($0) }) { return true }
+        // `nfs_inst.exe`, `game-uninst.exe`: only as a whole word, so `against.exe` stays a game.
+        let words = stem.split { !$0.isLetter && !$0.isNumber }
+        return words.contains { $0 == "inst" || $0 == "uninst" }
     }
 
     /// Best-effort display name: the game's folder if it's descriptive, otherwise the exe name tidied up.

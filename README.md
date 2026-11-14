@@ -22,6 +22,13 @@ and lets you pick the engine it installs on (Wine 11, the CrossOver engine for o
 when D3DMetal is installed). While the installer runs you can cancel it, or tell Decanter it is done if it
 left a launcher or the game open. Installers get a private desktop, so no `.lnk` files land on your Mac's.
 Right-click a game → **Run Patch or Installer…** runs a patch, DLC or missing component in that game's bottle.
+*Install Steam…* downloads Valve's own installer for the Windows Steam client (about 2 MB, from Steam's
+servers) and runs it the same way, offering a bottle named Steam on the one engine the Steam client runs
+on: Sikarugir's Wine 10 (about 160 MB, fetched the first time). Stock Wine 11 can't draw Steam's window and
+CrossOver's Wine 9 can't complete Steam's internal connection on current macOS; Wine 10 with CrossOver's
+fixes does both. Games started from Steam run on Steam's engine, so it gets the same DXMT overlay as the
+main Wine for DirectX 10/11. Confirmed so far: signing in, downloading, and a DirectX 11 game (Rise of
+Nations: Extended Edition) reaching its menu.
 
 **Bottles.** A bottle is a named Windows environment that any number of games share, so patches, add-ons
 and multi-disc installers find what is already installed. Everything goes in the default bottle unless you
@@ -44,6 +51,15 @@ the renderer (DXMT, Apple's D3DMetal, the CrossOver engine, or Wine 11's built-i
 (fixes old games that crash on fullscreen mode switches), Retina rendering and the Metal HUD. *System*:
 MSync, DLL overrides (for mod loaders), environment variables, and Wine's own configuration and registry
 editor.
+
+**Scaled fullscreen.** A Mac's screen only offers its own resolutions, so a game that asks for 800x600 or
+1024x768 is refused and ends up in a small window. With *Scaled fullscreen* on in a game's *Graphics*
+settings, Decanter puts a virtual screen that has those resolutions in charge while the game runs and makes
+the real screen mirror it: the game goes fullscreen as it would on a PC, and macOS scales the picture to
+the whole screen, with black bars where the shape differs. The Mac's screen is back to normal when the game
+quits (or if Decanter does). Everything looks softer meanwhile, because the virtual screen isn't Retina.
+Virtual screens come from an undocumented part of macOS, the one display utilities use. Confirmed so far
+with Need for Speed Carbon on the CrossOver engine.
 
 Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete that folder to uninstall.
 
