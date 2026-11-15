@@ -48,6 +48,19 @@ struct ActiveInstall: Equatable {
     var discardsOnCancel = false
 }
 
+/// A game the Steam client in a bottle has downloaded that isn't in the library yet.
+struct SteamSuggestion: Identifiable, Equatable, Sendable {
+    let app: SteamApp
+    let bottleID: UUID
+    let engine: Engine
+    /// The game's own program, which its icon comes from.
+    let program: URL?
+
+    var id: String { Self.id(bottleID: bottleID, appID: app.appID) }
+
+    static func id(bottleID: UUID, appID: Int) -> String { "\(bottleID.uuidString):\(appID)" }
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -80,6 +93,13 @@ final class AppModel {
     private(set) var covers: [UUID: NSImage] = [:]
     /// The icon embedded in each game's program.
     private(set) var icons: [UUID: NSImage] = [:]
+    /// Steam games found in the bottles that the library doesn't have, offered in a banner.
+    private(set) var steamSuggestions: [SteamSuggestion] = []
+    /// Each suggestion's cover, or failing that its program's icon, by `SteamSuggestion.id`.
+    private(set) var steamArtwork: [String: NSImage] = [:]
+    /// The user is picking which of the suggested Steam games to add.
+    var choosingSteamGames = false
+    @ObservationIgnored private var scanningSteam = false
 
     static var downloadsCoversAutomatically: Bool {
         UserDefaults.standard.object(forKey: "autoCovers") as? Bool ?? true
@@ -93,6 +113,7 @@ final class AppModel {
         games = AppModel.loadLibrary()
         for game in games { loadArtwork(for: game) }
         fetchMissingCovers()
+        findSteamGames()
     }
 
     /// Games added before detection existed get inspected once; their renderer choice is left alone
@@ -215,6 +236,7 @@ final class AppModel {
             defer {
                 busyMessage = nil
                 activeInstall = nil
+                findSteamGames()
             }
             var created: UUID?
             do {
@@ -409,6 +431,7 @@ final class AppModel {
         bottles.removeAll { $0.id == id }
         if defaultBottleID == id { defaultBottleID = nil }
         saveBottles()
+        steamSuggestions.removeAll { $0.bottleID == id }
         let runtime = runtime
         Task {
             // Wine keeps files open while it runs; stop it before the folder goes.
@@ -465,6 +488,103 @@ final class AppModel {
         addExecutable(url, bottleID: bottle.id, engine: engine)
     }
 
+    // MARK: Steam games
+
+    private static let dismissedSteamKey = "dismissedSteamGames"
+
+    /// Suggestions the user closed, or games they removed: not offered again until they ask.
+    private var dismissedSteamGames: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: Self.dismissedSteamKey) ?? []) }
+        set { UserDefaults.standard.set(newValue.sorted(), forKey: Self.dismissedSteamKey) }
+    }
+
+    /// Reads what the Steam client in each bottle has downloaded and offers whatever the library
+    /// lacks. `includingDismissed` is the user asking outright, which brings back what they closed.
+    func findSteamGames(includingDismissed: Bool = false) {
+        if includingDismissed { dismissedSteamGames = [] }
+        guard !scanningSteam else { return }
+        scanningSteam = true
+        let places = bottles.flatMap { bottle in
+            bottle.engines.compactMap { engine in bottle.prefix(for: engine).map { (bottle.id, engine, $0) } }
+        }
+        let skipped = dismissedSteamGames.union(games.compactMap { game in
+            game.steamAppID.map { SteamSuggestion.id(bottleID: game.bottleID, appID: $0) }
+        })
+        Task {
+            let found = await Task.detached { () -> [(SteamSuggestion, Data?)] in
+                var found: [(SteamSuggestion, Data?)] = []
+                for (bottleID, engine, prefix) in places {
+                    for client in SteamLibrary.clients(in: prefix) {
+                        for app in SteamLibrary.apps(client: client, prefix: prefix)
+                        where !skipped.contains(SteamSuggestion.id(bottleID: bottleID, appID: app.appID)) {
+                            // Something with no program in it (a soundtrack, say) can't be played.
+                            guard let program = app.mainProgram() else { continue }
+                            let artwork = app.cachedCover.flatMap { try? Data(contentsOf: $0) }
+                                ?? ExecutableInspector.icon(of: program)
+                            found.append((SteamSuggestion(app: app, bottleID: bottleID, engine: engine, program: program), artwork))
+                        }
+                    }
+                }
+                return found
+            }.value
+            scanningSteam = false
+            // A game added by hand from Steam's folder is already here.
+            let fresh = found.filter { suggestion, _ in
+                bottle(suggestion.bottleID) != nil && !games.contains { game in
+                    game.steamAppID == suggestion.app.appID && game.bottleID == suggestion.bottleID
+                        || game.executablePath.hasPrefix(suggestion.app.folder.path + "/")
+                }
+            }
+            steamSuggestions = fresh.map(\.0)
+            steamArtwork = Dictionary(fresh.compactMap { suggestion, data in
+                data.flatMap(NSImage.init(data:)).map { (suggestion.id, $0) }
+            }, uniquingKeysWith: { first, _ in first })
+            if steamSuggestions.isEmpty { choosingSteamGames = false }
+        }
+    }
+
+    /// Adds Steam games to the library. Steam starts them, so each one is `steam.exe -applaunch <id>`
+    /// in Steam's bottle, with the game's own icon and the cover Steam already has for it.
+    func addSteamGames(_ suggestions: [SteamSuggestion]) {
+        for suggestion in suggestions {
+            let app = suggestion.app
+            var game = Game(name: app.name, executablePath: app.client.path, bottleID: suggestion.bottleID)
+            game.steamAppID = app.appID
+            game.iconPath = suggestion.program?.path
+            game.settings.arguments = app.launchArguments
+            // Steam's engine runs it, whatever the game itself would have suited.
+            game.settings.renderer = GameInstaller.renderer(for: suggestion.engine)
+            game.requirements = suggestion.program.flatMap(ExecutableInspector.inspect)
+            // Its cover is found by Steam's own id for it rather than by searching for its name.
+            game.coverLookedUp = true
+            games.append(game)
+            loadArtwork(for: game)
+            if let data = app.cachedCover.flatMap({ try? Data(contentsOf: $0) }), setCover(data, for: game) {
+                continue
+            }
+            guard Self.downloadsCoversAutomatically else { continue }
+            let id = game.id
+            Task {
+                let candidate = CoverCandidate(id: app.appID, name: app.name, thumbnail: nil)
+                if let data = await CoverFinder.download(candidate), covers[id] == nil,
+                   let game = games.first(where: { $0.id == id }) {
+                    setCover(data, for: game)
+                }
+            }
+        }
+        LibraryStore.save(games)
+        let added = Set(suggestions.map(\.id))
+        steamSuggestions.removeAll { added.contains($0.id) }
+        for id in added { steamArtwork[id] = nil }
+    }
+
+    /// Closes the banner. These games aren't offered again unless the user asks to look for them.
+    func dismissSteamSuggestions() {
+        dismissedSteamGames.formUnion(steamSuggestions.map(\.id))
+        steamSuggestions = []
+        steamArtwork = [:]
+    }
+
     // MARK: D3DMetal add-on
 
     func installD3DMetal() {
@@ -506,7 +626,7 @@ final class AppModel {
             }
             self.runtime = runtime
         }
-        if renderer == .sikarugir && (!runtime.hasSikarugir || runtime.sikarugirLacksDXMT) {
+        if renderer == .sikarugir && (!runtime.hasSikarugir || runtime.sikarugirNeedsUpdate) {
             let previous = busyMessage
             busyMessage = runtime.hasSikarugir ? "Updating the engine for Steam…" : "Getting the engine for Steam (about 160 MB, one time)…"
             defer { busyMessage = previous }
@@ -545,6 +665,7 @@ final class AppModel {
                     games[index].lastPlayed = Date()
                     LibraryStore.save(games)
                 }
+                await matchSteamRouting(for: game, prefix: prefix, runtime: runtime)
                 await Launcher.applyRegistrySettings(game: game, prefix: prefix, runtime: runtime)
                 // Fill the screen: the Mac drops to the resolution that best fits the window, and the
                 // Windows desktop takes that size, leaving the game's own resolution to size the window.
@@ -561,6 +682,8 @@ final class AppModel {
                     filled = true
                     fillingScreen.insert(id)
                 }
+                await Launcher.applySteamDesktop(game: launched, prefix: prefix, runtime: runtime)
+                await ModLoaders.apply(game: launched, prefix: prefix, runtime: runtime)
                 let started = Date()
                 let restoreScreen = {
                     if scaled { ScaledFullscreen.end() }
@@ -574,6 +697,8 @@ final class AppModel {
                             restoreScreen()
                             self.running.remove(id)
                             self.addPlayTime(Date().timeIntervalSince(started), to: id)
+                            // Steam just quit, perhaps after downloading something.
+                            self.findSteamGames()
                             if status != 0 && Date().timeIntervalSince(started) < 10 {
                                 self.errorMessage = "\(game.name) quit right after starting. "
                                     + "Open its settings to try a different renderer or a fixed-size window, or check the log."
@@ -589,6 +714,31 @@ final class AppModel {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// A game started through Steam runs with the environment Steam was started with, so its DirectX
+    /// routing is Steam's. When the game wants another one and Steam is already running, Steam is
+    /// asked to quit first and then starts again, with the game, on the game's routing.
+    private func matchSteamRouting(for game: Game, prefix: URL, runtime: InstalledRuntime) async {
+        guard runtime.engine(for: game.settings.renderer) == .sikarugir, Self.startsSteam(game) else { return }
+        let wanted = Launcher.wine10Graphics(for: game)
+        let steamRunning = games.contains {
+            $0.id != game.id && running.contains($0.id) && $0.bottleID == game.bottleID && Self.startsSteam($0)
+                && runtime.engine(for: $0.settings.renderer) == .sikarugir
+        }
+        if steamRunning, let current = Launcher.runningRouting(in: prefix), current != wanted {
+            let previous = busyMessage
+            busyMessage = "Restarting Steam for \(game.name)'s DirectX setting…"
+            defer { busyMessage = previous }
+            await Launcher.shutDownSteam(URL(fileURLWithPath: game.executablePath), prefix: prefix, runtime: runtime)
+        } else if steamRunning {
+            return
+        }
+        Launcher.recordRouting(wanted, in: prefix)
+    }
+
+    private static func startsSteam(_ game: Game) -> Bool {
+        game.steamAppID != nil || URL(fileURLWithPath: game.executablePath).lastPathComponent.lowercased() == "steam.exe"
     }
 
     /// Wine can only end a whole prefix at once, so this also ends anything else running in the
@@ -640,8 +790,10 @@ final class AppModel {
 
     private func loadArtwork(for game: Game) {
         covers[game.id] = CoverStore.data(for: game.id).flatMap(NSImage.init(data:))
-        icons[game.id] = ExecutableInspector.icon(of: URL(fileURLWithPath: game.executablePath))
-            .flatMap(NSImage.init(data:))
+        // A game Steam starts shows its own icon, not Steam's.
+        icons[game.id] = [game.iconPath, game.executablePath].lazy
+            .compactMap { $0.flatMap { ExecutableInspector.icon(of: URL(fileURLWithPath: $0)) } }
+            .compactMap(NSImage.init(data:)).first
     }
 
     /// Saves image data as the game's cover. Returns false if it isn't an image.
@@ -724,6 +876,10 @@ final class AppModel {
     }
 
     private func forget(_ game: Game) {
+        // Taken out on purpose: don't offer it straight back.
+        if let appID = game.steamAppID {
+            dismissedSteamGames.insert(SteamSuggestion.id(bottleID: game.bottleID, appID: appID))
+        }
         games.removeAll { $0.id == game.id }
         running.remove(game.id)
         CoverStore.remove(game.id)

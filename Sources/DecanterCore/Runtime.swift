@@ -11,11 +11,48 @@ public enum Renderer: String, Codable, CaseIterable, Identifiable, Sendable {
     /// CrossOver's Wine 9 with its built-in renderers. The most compatible choice for 32-bit and
     /// Direct3D 9-era games; downloaded the first time a game needs it.
     case crossover
-    /// Sikarugir's Wine 10 with its built-in renderers. The one engine the Windows Steam client runs
-    /// on; downloaded the first time something needs it.
+    /// Sikarugir's Wine 10, the one engine the Windows Steam client runs on, with Direct3D 10/11
+    /// or 12 routed to a translator per game (see `Wine10Graphics`). Downloaded the first time
+    /// something needs it.
     case sikarugir
 
     public var id: String { rawValue }
+}
+
+/// Which translator each DirectX version gets on the Wine 10 engine.
+///
+/// That engine is CrossOver-based, and its loader searches one folder per graphics backend
+/// (`WINEDLLPATH_DXMT`, `WINEDLLPATH_D9VK`, …) before its own DLLs, chosen by environment variable
+/// for each process. So one engine and one Windows environment serve every route, and switching
+/// between them needs no second copy of Wine.
+///
+/// What can't be had at once: Wine's Direct3D 12 (vkd3d) only works with Wine's own DXGI, and DXMT
+/// replaces DXGI, so a process gets either DXMT's Direct3D 10/11 or Direct3D 12.
+///
+/// Direct3D 9 stays on Wine's own renderer. DXVK was tried for it (Nov 2026): Gcenx's 2023 macOS
+/// build can't create a device on current MoltenVK, and Sikarugir's 2025 d9vk only draws, wrongly,
+/// with CrossOver's patched MoltenVK.
+public enum Wine10Graphics: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// From what the game was detected to use: DXMT for Direct3D 10/11, vkd3d for 12 alone, Wine's
+    /// own for 9 and older. DXMT also replaces DXGI, which older games never use but Steam's overlay
+    /// hooks inside them (GTA: Vice City hangs with it). Undetected programs, Steam itself
+    /// among them, get DXMT, as Steam's engine always did.
+    case automatic
+    /// Direct3D 10/11 → DXMT → Metal.
+    case metal
+    /// Direct3D 12 → vkd3d → MoltenVK → Metal; 10/11 → Wine's own.
+    case vkd3d
+    /// Wine's own renderers for everything (wined3d), as before.
+    case wine
+
+    public var id: String { rawValue }
+
+    public func resolved(for requirements: GameRequirements?) -> Wine10Graphics {
+        guard self == .automatic else { return self }
+        guard let directX = requirements?.directX, !directX.isEmpty else { return .metal }
+        if directX.contains(10) || directX.contains(11) { return .metal }
+        return directX.contains(12) ? .vkd3d : .wine
+    }
 }
 
 /// D3DMetal only works inside Apple's own (older) Wine, so it is a separate engine with separate bottles.
@@ -44,7 +81,8 @@ public struct InstalledRuntime: Codable, Equatable {
     /// Wine root of the CrossOver engine, if installed.
     public var crossoverPath: String?
     public var sikarugirTag: String?
-    /// Wine root of the Sikarugir Wine 10 engine, if installed.
+    /// Wine root of the Sikarugir Wine 10 engine, if installed. Left as downloaded: the graphics
+    /// backends reach it through environment variables (see `wine10Environment`).
     public var sikarugirPath: String?
 
     public init(wineTag: String, dxmtTag: String? = nil, basePath: String, metalPath: String? = nil,
@@ -60,10 +98,30 @@ public struct InstalledRuntime: Codable, Equatable {
     public var hasD3DMetal: Bool { gptkPath != nil }
     public var hasCrossOver: Bool { crossoverPath != nil }
     public var hasSikarugir: Bool { sikarugirPath != nil }
-    /// Installed before it came with DXMT: installing it again adds the overlay without downloading.
-    public var sikarugirLacksDXMT: Bool {
-        guard let sikarugirPath, dxmtTag != nil else { return false }
-        return !sikarugirPath.contains("+dxmt-")
+    /// Still pointing at the copy with DXMT in place of the engine's own DLLs that older versions
+    /// made: installing it again moves to the engine as downloaded, without downloading it.
+    public var sikarugirNeedsUpdate: Bool {
+        sikarugirPath?.contains("+dxmt-") == true
+    }
+
+    /// The folder holding DXMT's `x86_64-windows`, `x86_64-unix` and `i386-windows`, if installed.
+    public var dxmtRoot: URL? {
+        guard let dxmtTag else { return nil }
+        let component = Paths.components.appendingPathComponent("dxmt-\(dxmtTag)", isDirectory: true)
+        return RuntimeManager.archDirectories(in: component).first?.deletingLastPathComponent()
+    }
+
+    /// Environment that routes each DirectX version on the Wine 10 engine. The variables are read by
+    /// that engine's loader alone; the other engines ignore them.
+    public func wine10Environment(_ graphics: Wine10Graphics) -> [String: String] {
+        var env: [String: String] = [:]
+        switch graphics {
+        case .metal, .automatic:
+            if let dxmtRoot { env["WINEDLLPATH_DXMT"] = dxmtRoot.path }
+        case .wine, .vkd3d:
+            break
+        }
+        return env
     }
 
     public func has(_ engine: Engine) -> Bool {
@@ -99,12 +157,16 @@ public struct InstalledRuntime: Codable, Equatable {
     /// because a wrapper app normally supplies them. Decanter's main Wine carries compatible copies.
     public func libraryFallback(for engine: Engine) -> String? {
         let own: String?
+        var first: [String] = []
         switch engine {
         case .crossover: own = crossoverPath
-        case .sikarugir: own = sikarugirPath
+        case .sikarugir:
+            own = sikarugirPath
+            // Ahead of the main Wine's Vulkan loader, which hides MoltenVK from this older Wine.
+            first = [RuntimeManager.moltenVKFolder.path]
         case .wine, .gptk: return nil
         }
-        return ([own, basePath, gptkPath].compactMap { $0 }.map { $0 + "/lib" } + ["/usr/local/lib", "/usr/lib"])
+        return (first + [own, basePath, gptkPath].compactMap { $0 }.map { $0 + "/lib" } + ["/usr/local/lib", "/usr/lib"])
             .joined(separator: ":")
     }
 
@@ -187,7 +249,27 @@ public enum RuntimeManager {
             runtime.sikarugirPath = nil
             runtime.sikarugirTag = nil
         }
+        if runtime.hasSikarugir { linkMoltenVK(runtime) }
         return runtime
+    }
+
+    // MARK: - Wine 10 graphics
+
+    /// Holds `libvulkan.1.dylib`, a link to the main Wine's MoltenVK.
+    public static var moltenVKFolder: URL { Paths.components.appendingPathComponent("moltenvk", isDirectory: true) }
+
+    /// The Wine 10 engine opens `libvulkan.1.dylib` and finds the main Wine's Vulkan loader, which
+    /// only lists MoltenVK to programs that ask for "portability" drivers, and this Wine doesn't: it
+    /// then has no Vulkan at all. CrossOver links MoltenVK in the loader's place; so does this.
+    static func linkMoltenVK(_ runtime: InstalledRuntime) {
+        let fm = FileManager.default
+        let target = runtime.basePath + "/lib/libMoltenVK.dylib"
+        let link = moltenVKFolder.appendingPathComponent("libvulkan.1.dylib")
+        guard fm.fileExists(atPath: target),
+              (try? fm.destinationOfSymbolicLink(atPath: link.path)) != target else { return }
+        try? Paths.ensure(moltenVKFolder)
+        try? fm.removeItem(at: link)
+        try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: target)
     }
 
     public static func setup(progress: @escaping ProgressHandler) async throws -> InstalledRuntime {
@@ -252,25 +334,13 @@ public enum RuntimeManager {
         progress(.init(stage: "Finding the Wine 10 engine…", fraction: nil))
         let (tag, asset) = try await newestEngine(named: sikarugirPrefix, label: "Wine 10")
         let directory = Paths.runtimes.appendingPathComponent("sk-\(tag)", isDirectory: true)
-        var root = try await installWineArchive(asset, into: directory, label: "Wine 10 engine", progress: progress)
-        // The engine's own Direct3D 11 can't run on a Mac, so games started from Steam (which run on
-        // Steam's engine) get DXMT the same way the main Wine does. Without DXMT it stays as it is.
-        if let dxmtTag = current.dxmtTag {
-            let component = Paths.components.appendingPathComponent("dxmt-\(dxmtTag)", isDirectory: true)
-            let overlayDir = Paths.runtimes.appendingPathComponent("sk-\(tag)+dxmt-\(dxmtTag)", isDirectory: true)
-            let overlayRoot = URL(fileURLWithPath: overlayDir.path + root.path.dropFirst(directory.path.count), isDirectory: true)
-            if FileManager.default.fileExists(atPath: overlayDir.appendingPathComponent(overlayMarker).path) {
-                root = overlayRoot
-            } else if FileManager.default.fileExists(atPath: component.path) {
-                progress(.init(stage: "Adding the Metal renderer to the Wine 10 engine…", fraction: nil))
-                if (try? await overlayDXMT(from: component, onto: directory, as: overlayDir, root: overlayRoot)) != nil {
-                    root = overlayRoot
-                }
-            }
-        }
+        let root = try await installWineArchive(asset, into: directory, label: "Wine 10 engine", progress: progress)
         var runtime = current
         runtime.sikarugirTag = tag
         runtime.sikarugirPath = root.path
+        // Older versions ran a copy of the engine with DXMT in place of its own DLLs. That copy is
+        // left alone (an APFS clone, nearly free): Steam may still be running from it.
+        linkMoltenVK(runtime)
         try await buildTemplate(.sikarugir, runtime: runtime, renderer: .sikarugir, progress: progress)
         try save(runtime)
         return runtime

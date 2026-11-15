@@ -66,6 +66,7 @@ struct LibraryView: View {
         .sheet(item: $model.installerResult) { InstallerResultSheet(result: $0) }
         .sheet(item: $model.coverSearch) { CoverSearchSheet(game: $0) }
         .sheet(isPresented: $model.managingBottles) { BottlesSheet(initial: selectedBottleID) }
+        .sheet(isPresented: $model.choosingSteamGames) { SteamGamesSheet() }
         .confirmationDialog(
             "Remove \(model.pendingRemoval?.name ?? "this game")?",
             isPresented: Binding(get: { model.pendingRemoval != nil }, set: { if !$0 { model.pendingRemoval = nil } }),
@@ -221,6 +222,9 @@ struct LibraryView: View {
         } isTargeted: {
             dropTargeted = $0
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if !model.steamSuggestions.isEmpty { SteamSuggestionBanner() }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !model.games.isEmpty {
                 ActionBar(game: selectedGame, gameCount: games.count,
@@ -322,6 +326,7 @@ struct LibraryView: View {
                 Button("Install from Installer…") { chooseFile(installer: true) }
                     .keyboardShortcut("i")
                 Button("Install Steam…") { model.installSteam() }
+                Button("Find Steam Games") { model.findSteamGames(includingDismissed: true) }
                 Divider()
                 Button("Manage Bottles…") { model.managingBottles = true }
                     .keyboardShortcut("b")

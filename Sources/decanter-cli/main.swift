@@ -19,7 +19,7 @@ let report: ProgressHandler = { progress in
 func install(_ file: URL, bottleName: String, engine: Engine, arguments: String) async throws {
     guard var runtime = RuntimeManager.load() else { throw DecanterError("Run `decanter-cli setup` first.") }
     // The optional engines are fetched the first time something is installed on them, as in the app.
-    if engine == .sikarugir, !runtime.hasSikarugir || runtime.sikarugirLacksDXMT { runtime = try await RuntimeManager.installSikarugir(into: runtime, progress: report) }
+    if engine == .sikarugir, !runtime.hasSikarugir || runtime.sikarugirNeedsUpdate { runtime = try await RuntimeManager.installSikarugir(into: runtime, progress: report) }
     if engine == .crossover, !runtime.hasCrossOver { runtime = try await RuntimeManager.installCrossOver(into: runtime, progress: report) }
     guard runtime.has(engine) else { throw DecanterError("That engine isn't installed.") }
     var list = BottleStore.loadAdopting()
@@ -109,8 +109,22 @@ do {
         for program in GameInstaller.installedPrograms(prefix: BottleStore.prefix(id), since: template) {
             print("\(program.name)\(program.hasShortcut ? " (shortcut)" : ""): \(program.executable.path) \(program.arguments)")
         }
+    case "steam-games":
+        // decanter-cli steam-games: what the app offers to add from the Steam clients in every bottle.
+        for bottle in BottleStore.load().bottles {
+            for engine in bottle.engines {
+                guard let prefix = bottle.prefix(for: engine) else { continue }
+                for client in SteamLibrary.clients(in: prefix) {
+                    for app in SteamLibrary.apps(client: client, prefix: prefix) {
+                        print("\(app.appID) \(app.name) [\(bottle.displayName), \(engine.rawValue)]")
+                        print("  icon from: \(app.mainProgram()?.path ?? "none")")
+                        print("  cover: \(app.cachedCover?.path ?? "none")")
+                    }
+                }
+            }
+        }
     default:
-        print("usage: decanter-cli [setup|d3dmetal|crossover|sikarugir|status|inspect <exe>…|icon <exe> <out.ico>|install <installer> [engine]|steam [engine]|scan <prefix id> [engine]]")
+        print("usage: decanter-cli [setup|d3dmetal|crossover|sikarugir|status|inspect <exe>…|icon <exe> <out.ico>|install <installer> [engine]|steam [engine]|steam-games|scan <prefix id> [engine]]")
         exit(2)
     }
 } catch {
