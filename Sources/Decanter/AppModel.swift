@@ -111,6 +111,8 @@ final class AppModel {
         bottles = list.bottles
         defaultBottleID = list.defaultID
         games = AppModel.loadLibrary()
+        let problems = LibraryStore.takeLoadProblems()
+        if !problems.isEmpty { errorMessage = problems.joined(separator: "\n\n") }
         for game in games { loadArtwork(for: game) }
         fetchMissingCovers()
         findSteamGames()

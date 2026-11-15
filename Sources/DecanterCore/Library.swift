@@ -173,18 +173,17 @@ public enum GameCategories {
 }
 
 public enum LibraryStore {
+    /// A library that can't be read is kept aside, never overwritten (see `StoreFile`).
     public static func load() -> [Game] {
-        guard let data = try? Data(contentsOf: Paths.library) else { return [] }
-        return (try? JSONDecoder().decode([Game].self, from: data)) ?? []
+        StoreFile.load(Paths.library, what: "its library") { StoreFile.salvageArray($0, of: Game.self) } ?? []
     }
 
     public static func save(_ games: [Game]) {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(games) else { return }
-        try? Paths.ensure(Paths.root)
-        try? data.write(to: Paths.library, options: .atomic)
+        StoreFile.save(games, to: Paths.library)
     }
+
+    /// What went wrong reading the library or the bottle list, worded for the user; each problem once.
+    public static func takeLoadProblems() -> [String] { StoreFile.takeProblems() }
 }
 
 /// A bottle is a named Windows environment that any number of games can be installed in, so an
@@ -247,17 +246,33 @@ public struct BottleList: Codable, Equatable {
 }
 
 public enum BottleStore {
+    /// A bottle list that can't be read is kept aside, never overwritten (see `StoreFile`). A game
+    /// whose bottle was lost with it gets a new entry from `adopt`; the bottle's files stay on disk.
     public static func load() -> BottleList {
-        guard let data = try? Data(contentsOf: Paths.bottleList) else { return BottleList() }
-        return (try? JSONDecoder().decode(BottleList.self, from: data)) ?? BottleList()
+        StoreFile.load(Paths.bottleList, what: "its list of bottles", salvage: salvage) ?? BottleList()
     }
 
     public static func save(_ list: BottleList) {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(list) else { return }
-        try? Paths.ensure(Paths.root)
-        try? data.write(to: Paths.bottleList, options: .atomic)
+        StoreFile.save(list, to: Paths.bottleList)
+    }
+
+    private struct DamagedList: Decodable {
+        var bottles: [Lenient<Bottle>]?
+        var defaultID: UUID?
+        enum Keys: String, CodingKey { case bottles, defaultID }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            bottles = try? c.decodeIfPresent([Lenient<Bottle>].self, forKey: .bottles)
+            defaultID = try? c.decodeIfPresent(UUID.self, forKey: .defaultID)
+        }
+    }
+
+    static func salvage(_ data: Data) -> (value: BottleList, lost: Int, total: Int)? {
+        guard let damaged = try? JSONDecoder().decode(DamagedList.self, from: data) else { return nil }
+        let entries = damaged.bottles ?? []
+        let kept = entries.compactMap(\.value)
+        let defaultID = kept.contains { $0.id == damaged.defaultID } ? damaged.defaultID : nil
+        return (BottleList(bottles: kept, defaultID: defaultID), entries.count - kept.count, entries.count)
     }
 
     /// The bottle list, with a bottle for every game in the library. Libraries from before bottles

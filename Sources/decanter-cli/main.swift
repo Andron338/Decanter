@@ -23,6 +23,7 @@ func install(_ file: URL, bottleName: String, engine: Engine, arguments: String)
     if engine == .crossover, !runtime.hasCrossOver { runtime = try await RuntimeManager.installCrossOver(into: runtime, progress: report) }
     guard runtime.has(engine) else { throw DecanterError("That engine isn't installed.") }
     var list = BottleStore.loadAdopting()
+    for problem in LibraryStore.takeLoadProblems() { FileHandle.standardError.write(Data("warning: \(problem)\n".utf8)) }
     var bottle = Bottle(name: bottleName)
     let prefixID = try await BottleStore.ensurePrefix(for: engine, in: bottle)
     bottle.prefixes[engine.rawValue] = prefixID

@@ -1000,6 +1000,79 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(decoded.categoryNames, ["Finished"])
     }
 
+    private func withHome(_ body: (URL) throws -> Void) throws {
+        let home = try temporaryFolder()
+        let saved = Paths.root
+        Paths.root = home
+        StoreFile.reset()
+        defer { Paths.root = saved; StoreFile.reset() }
+        try body(home)
+    }
+
+    private func asideFiles(in home: URL, named stem: String) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: home, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(stem + ".unreadable-") }
+    }
+
+    func testALibraryWithAnUnreadableGameKeepsTheRestAndAKeptCopy() throws {
+        try withHome { home in
+            let good = Game(name: "Good", executablePath: "/g.exe", bottleID: UUID())
+            var entries = try JSONSerialization.jsonObject(with: JSONEncoder().encode([good, good])) as! [Any]
+            entries[1] = ["name": "Broken"]  // no id, path or bottle
+            let original = try JSONSerialization.data(withJSONObject: entries)
+            try original.write(to: Paths.library)
+
+            XCTAssertEqual(LibraryStore.load().map(\.name), ["Good"])
+            let kept = try asideFiles(in: home, named: "library")
+            XCTAssertEqual(kept.count, 1)
+            XCTAssertEqual(try Data(contentsOf: kept[0]), original)
+            XCTAssertEqual(LibraryStore.takeLoadProblems().count, 1)
+            // The salvaged library was written back, so the next load is clean.
+            XCTAssertEqual(LibraryStore.load().map(\.name), ["Good"])
+            XCTAssertTrue(LibraryStore.takeLoadProblems().isEmpty)
+            XCTAssertEqual(try asideFiles(in: home, named: "library").count, 1)
+        }
+    }
+
+    func testALibraryThatIsNotJSONIsKeptAsideNotOverwritten() throws {
+        try withHome { home in
+            let original = Data("{ not json".utf8)
+            try original.write(to: Paths.library)
+            XCTAssertTrue(LibraryStore.load().isEmpty)
+            XCTAssertEqual(try asideFiles(in: home, named: "library").map { try Data(contentsOf: $0) }, [original])
+            XCTAssertFalse(LibraryStore.takeLoadProblems().isEmpty)
+            LibraryStore.save([Game(name: "New", executablePath: "/n.exe", bottleID: UUID())])
+            XCTAssertEqual(LibraryStore.load().map(\.name), ["New"])
+        }
+    }
+
+    func testADamagedBottleListKeepsItsReadableBottles() throws {
+        try withHome { home in
+            let bottle = Bottle(name: "Kept")
+            var object = try JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(BottleList(bottles: [bottle], defaultID: bottle.id))) as! [String: Any]
+            object["bottles"] = (object["bottles"] as! [Any]) + [["name": 5]]
+            try JSONSerialization.data(withJSONObject: object).write(to: Paths.bottleList)
+            let list = BottleStore.load()
+            XCTAssertEqual(list.bottles.map(\.name), ["Kept"])
+            XCTAssertEqual(list.defaultID, bottle.id)
+            XCTAssertEqual(try asideFiles(in: home, named: "bottles").count, 1)
+        }
+    }
+
+    func testALibraryThatCannotBeOpenedIsNeverSavedOver() throws {
+        try withHome { _ in
+            let original = try JSONEncoder().encode([Game(name: "Mine", executablePath: "/m.exe", bottleID: UUID())])
+            try original.write(to: Paths.library)
+            try FileManager.default.setAttributes([.posixPermissions: 0o200], ofItemAtPath: Paths.library.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: Paths.library.path) }
+            XCTAssertTrue(LibraryStore.load().isEmpty)
+            LibraryStore.save([])
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: Paths.library.path)
+            XCTAssertEqual(try Data(contentsOf: Paths.library), original)
+        }
+    }
+
     func testProgramInsideABottlePrefixBelongsToThatBottle() {
         let crossoverPrefix = UUID(), winePrefix = UUID()
         let game = Bottle(name: "Game", prefixes: [Engine.crossover.rawValue: crossoverPrefix,
