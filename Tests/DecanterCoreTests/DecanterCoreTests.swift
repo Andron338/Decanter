@@ -1169,6 +1169,68 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertNil(RuntimeManager.newestEngine(named: "WS12WineSikarugir11", in: engines))
     }
 
+    func testShellCapturesOutputAndStatus() async throws {
+        let result = try await Shell.run("/bin/sh", ["-c", "echo out; echo err >&2; exit 3"], check: false)
+        XCTAssertEqual(result.status, 3)
+        XCTAssertEqual(Set(result.output.split(separator: "\n")), ["out", "err"])
+        do {
+            try await Shell.run("/bin/sh", ["-c", "echo why; exit 2"])
+            XCTFail("a failing command should throw")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("status 2"))
+            XCTAssertTrue(error.localizedDescription.contains("why"))
+        }
+    }
+
+    func testShellStopsAProgramThatRunsTooLong() async {
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            try await Shell.run("/bin/sleep", ["30"], check: false, timeout: .milliseconds(200))
+            XCTFail("the timeout should throw")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("didn't finish within"), "\(error)")
+        }
+        XCTAssertLessThan(clock.now - started, .seconds(5))
+    }
+
+    func testShellStopsWhenItsTaskIsCancelled() async {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let task = Task { try await Shell.run("/bin/sleep", ["30"], check: false) }
+        try? await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        let result = await task.result
+        XCTAssertThrowsError(try result.get()) { XCTAssertTrue($0 is CancellationError, "\($0)") }
+        XCTAssertLessThan(clock.now - started, .seconds(5))
+
+        // Cancelled before it even starts: it never runs to completion either.
+        let early = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await Shell.run("/bin/sleep", ["30"], check: false)
+        }
+        let earlyResult = await early.result
+        XCTAssertThrowsError(try earlyResult.get())
+        XCTAssertLessThan(clock.now - started, .seconds(10))
+    }
+
+    func testShellDoesNotWaitForABackgroundChildHoldingItsOutput() async throws {
+        let clock = ContinuousClock()
+        let started = clock.now
+        // Like wine starting wineserver: the child keeps the output pipe open after its parent exits.
+        let result = try await Shell.run("/bin/sh", ["-c", "sleep 30 & echo started"])
+        XCTAssertEqual(result.output.trimmingCharacters(in: .whitespacesAndNewlines), "started")
+        XCTAssertLessThan(clock.now - started, .seconds(5))
+        _ = try? await Shell.run("/usr/bin/pkill", ["-f", "^sleep 30$"], check: false)
+    }
+
+    func testDurationsReadNaturally() {
+        XCTAssertEqual(Duration.seconds(300).spokenLength, "5 minutes")
+        XCTAssertEqual(Duration.seconds(60).spokenLength, "a minute")
+        XCTAssertEqual(Duration.seconds(90).spokenLength, "90 seconds")
+        XCTAssertEqual(Duration.milliseconds(200).spokenLength, "0 seconds")
+    }
+
     /// Hands out one process list per call, repeating the last.
     private final class FakeProcesses: @unchecked Sendable {
         private var lists: [[String]]

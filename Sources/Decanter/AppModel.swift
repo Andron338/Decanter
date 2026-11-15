@@ -147,10 +147,13 @@ final class AppModel {
 
     // MARK: Setup
 
+    @ObservationIgnored private var setupTask: Task<Void, Never>?
+
     func runSetup() {
         if case .working = setupState { return }
         setupState = .working(stage: "Starting…", fraction: nil)
-        Task {
+        setupTask = Task {
+            defer { setupTask = nil }
             do {
                 let installed = try await RuntimeManager.setup { progress in
                     Task { @MainActor in
@@ -161,10 +164,18 @@ final class AppModel {
                 }
                 runtime = installed
                 setupState = .needed
+            } catch where Task.isCancelled {
+                setupState = .needed
             } catch {
                 setupState = .failed(error.localizedDescription)
             }
         }
+    }
+
+    /// Stops setup where it is: the download, the unpacking or Wine. What finished is kept and
+    /// skipped next time; nothing half-done is.
+    func cancelSetup() {
+        setupTask?.cancel()
     }
 
     // MARK: Adding games

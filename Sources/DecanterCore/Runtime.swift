@@ -327,6 +327,7 @@ public enum RuntimeManager {
 
     public static func setup(progress: @escaping ProgressHandler) async throws -> InstalledRuntime {
         try [Paths.runtimes, Paths.components, Paths.downloads, Paths.bottles, Paths.logs].forEach(Paths.ensure)
+        try await checkRosetta()
 
         // 1. Wine
         progress(.init(stage: "Finding the latest Wine build…", fraction: nil))
@@ -347,6 +348,7 @@ public enum RuntimeManager {
             runtime.dxmtTag = tag
             runtime.metalPath = root.path
         } catch {
+            try Task.checkCancellation()
             progress(.init(stage: "Metal renderer unavailable (\(error.localizedDescription)) — continuing…", fraction: nil))
         }
 
@@ -447,10 +449,23 @@ public enum RuntimeManager {
         let archive = Paths.downloads.appendingPathComponent(asset.name)
         try await fetch(asset, to: archive, label: "Downloading \(label)", progress: progress)
         progress(.init(stage: "Unpacking \(label)…", fraction: nil))
-        try? fm.removeItem(at: directory)
-        try Paths.ensure(directory)
-        try await Shell.run("/usr/bin/tar", ["-xJf", archive.path, "-C", directory.path])
-        try await Shell.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", directory.path], check: false)
+        // Unpacked beside its final place and moved there whole, so an unpacking that was cancelled
+        // or cut short never leaves a folder that looks installed.
+        let partial = directory.deletingLastPathComponent().appendingPathComponent(directory.lastPathComponent + ".partial")
+        try? fm.removeItem(at: partial)
+        try Paths.ensure(partial)
+        do {
+            try await Shell.run("/usr/bin/tar", ["-xJf", archive.path, "-C", partial.path], timeout: .seconds(600))
+            try await Shell.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", partial.path], check: false)
+            guard findWineRoot(in: partial) != nil else {
+                throw DecanterError("The \(label) archive didn't contain a usable Wine (no bin/wineserver).")
+            }
+            try? fm.removeItem(at: directory)
+            try fm.moveItem(at: partial, to: directory)
+        } catch {
+            try? fm.removeItem(at: partial)
+            throw error
+        }
         try? fm.removeItem(at: archive)
         guard let root = findWineRoot(in: directory) else {
             throw DecanterError("The \(label) archive didn't contain a usable Wine (no bin/wineserver).")
@@ -472,11 +487,36 @@ public enum RuntimeManager {
             // Apple's Wine doesn't bundle Mono/Gecko and would stop to ask about installing them.
             env["WINEDLLOVERRIDES"] = "mscoree,mshtml="
         }
-        try await Shell.run(runtime.wine(for: renderer), ["wineboot", "-u"], environment: env)
-        try await Shell.run(runtime.wineserver(for: renderer), ["-w"], environment: env, check: false)
-        guard BottleStore.templateReady(engine) else {
-            throw DecanterError("Wine couldn't create its Windows environment. Is Rosetta 2 installed?")
+        let wineserver = runtime.wineserver(for: renderer)
+        do {
+            // Usually about a minute. Wine that is stuck (a dialog nobody can see, a missing library)
+            // otherwise keeps setup waiting forever.
+            try await Shell.run(runtime.wine(for: renderer), ["wineboot", "-u"], environment: env, timeout: .seconds(300))
+            try await Shell.run(wineserver, ["-w"], environment: env, check: false, timeout: .seconds(120))
+            guard BottleStore.templateReady(engine) else {
+                throw DecanterError("Wine couldn't create its Windows environment. Is Rosetta 2 installed?")
+            }
+        } catch {
+            // Whatever Wine left running goes, and so does the half-made environment, which would
+            // otherwise count as ready.
+            _ = try? await Shell.run(wineserver, ["-k"], environment: env, check: false, timeout: .seconds(30))
+            try? FileManager.default.removeItem(at: prefix)
+            throw error
         }
+    }
+
+    /// Wine for macOS is an Intel program, so on Apple silicon it needs Rosetta 2.
+    public static func checkRosetta() async throws {
+        #if arch(arm64)
+        let result = try? await Shell.run(URL(fileURLWithPath: "/usr/bin/arch"), ["-x86_64", "/usr/bin/true"],
+                                          check: false, timeout: .seconds(30))
+        guard result?.status == 0 else {
+            throw DecanterError("""
+                Decanter needs Rosetta 2, which isn't installed. To install it, open Terminal and run \
+                softwareupdate --install-rosetta, then click Try Again.
+                """)
+        }
+        #endif
     }
 
     private static func installDXMT(
@@ -557,14 +597,19 @@ public enum RuntimeManager {
     private static func fetch(
         _ asset: GitHubRelease.Asset, to archive: URL, label: String, progress: @escaping ProgressHandler
     ) async throws {
+        // Nothing is installed unchecked: the asset was picked for having a checksum.
+        guard let expected = asset.sha256 else {
+            throw DecanterError("\(asset.name) has no checksum to verify it by, so it wasn't installed.")
+        }
+        // A download kept from a setup that was cancelled or failed later on is used again if it checks out.
+        if FileManager.default.fileExists(atPath: archive.path) {
+            progress(.init(stage: "Verifying earlier download…", fraction: nil))
+            if (try? Checksum.sha256(of: archive)) == expected { return }
+            try? FileManager.default.removeItem(at: archive)
+        }
         progress(.init(stage: label, fraction: 0))
         try await Downloader.download(from: asset.browser_download_url, to: archive) {
             progress(.init(stage: label, fraction: $0))
-        }
-        // Nothing is installed unchecked: the asset was picked for having a checksum.
-        guard let expected = asset.sha256 else {
-            try? FileManager.default.removeItem(at: archive)
-            throw DecanterError("\(asset.name) has no checksum to verify it by, so it wasn't installed.")
         }
         progress(.init(stage: "Verifying download…", fraction: nil))
         guard try Checksum.sha256(of: archive) == expected else {

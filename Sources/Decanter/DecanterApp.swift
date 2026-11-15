@@ -103,8 +103,10 @@ struct SetupView: View {
                         ProgressView().controlSize(.small)
                     }
                     Text(stage).font(.callout).foregroundStyle(.secondary)
+                    Button("Cancel") { model.cancelSetup() }
+                        .keyboardShortcut(.cancelAction)
                 }
-                .frame(height: 60)
+                .frame(height: 90)
             case .failed(let message):
                 Text(message)
                     .foregroundStyle(.red)
