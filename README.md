@@ -12,7 +12,7 @@ no setup questions: click **Set Up** once, then drop a game's `.exe` (or its ins
 
 | Step | What Decanter does |
 |---|---|
-| **Set Up** (once, ~235 MB) | Downloads the latest [Wine Staging build for macOS](https://github.com/Gcenx/macOS_Wine_builds) and [DXMT](https://github.com/3Shain/dxmt) (Direct3D 10/11 → Metal), verifies their SHA-256 digests, and pre-builds a template Windows environment. |
+| **Set Up** (once, ~235 MB) | Downloads the tested [Wine Staging build for macOS](https://github.com/Gcenx/macOS_Wine_builds) and [DXMT](https://github.com/3Shain/dxmt) (Direct3D 10/11 → Metal), checks them against the SHA-256 checksums recorded in Decanter, and pre-builds a template Windows environment. |
 | **Drop a game** | Puts it in the default bottle (a Windows environment cloned from the template: instant on APFS, no extra disk), reads the `.exe` to see whether it is 32/64-bit and which DirectX it uses, and picks the renderer to match. |
 | **Drop an installer** | Recognises Inno Setup (GOG), NSIS, InstallShield, WiX and `.msi` installers from the file itself, not its name. Runs it in the default bottle, where it can see the games already installed there, reads the Start menu and desktop shortcuts it added to find the game (and its name and launch arguments), and adds it to the library. If it can't tell which program is the game, it asks. |
 | **Play** | Launches through Wine with the renderer chosen for that game. |
@@ -141,6 +141,12 @@ open build/Decanter.app
 
 Requires Xcode 15+ (Swift 5.9+) and macOS 14+. `swift test` runs the core tests.
 `swift run decanter-cli setup|d3dmetal|crossover|status|inspect|install|scan` drives the same setup and install code without the UI. `Package.swift` opens directly in Xcode.
+
+**Engine versions.** Wine, DXMT, the Game Porting Toolkit and both engines are pinned in
+`EngineBuilds` (`Sources/DecanterCore/Runtime.swift`): exact file names and SHA-256 checksums of
+builds tried with real games. A bad upstream release can't break setup, and every install of one
+Decanter version gets the same files. To move to a newer build, try it first (*Settings → Download
+the newest engine builds*, or `DECANTER_NEWEST_ENGINES=1` for `decanter-cli`), then update its pin.
 
 ## CI and releases (local)
 

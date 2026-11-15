@@ -101,11 +101,15 @@ final class AppModel {
     var choosingSteamGames = false
     @ObservationIgnored private var scanningSteam = false
 
+    /// Settings key: new installs take the newest upstream engine builds instead of the pinned ones.
+    static let newestEnginesKey = "useNewestEngines"
+
     static var downloadsCoversAutomatically: Bool {
         UserDefaults.standard.object(forKey: "autoCovers") as? Bool ?? true
     }
 
     init() {
+        if UserDefaults.standard.bool(forKey: Self.newestEnginesKey) { EngineBuilds.useNewest = true }
         // Before the library: this is what moves older libraries' bottles into the bottle list.
         let list = BottleStore.loadAdopting()
         bottles = list.bottles

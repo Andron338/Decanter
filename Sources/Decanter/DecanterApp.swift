@@ -37,6 +37,7 @@ struct DecanterApp: App {
 struct PreferencesView: View {
     @Environment(AppModel.self) private var model
     @AppStorage("autoCovers") private var autoCovers = true
+    @AppStorage(AppModel.newestEnginesKey) private var newestEngines = false
 
     var body: some View {
         Form {
@@ -45,12 +46,20 @@ struct PreferencesView: View {
             } footer: {
                 Text("Decanter looks each new game's name up in the Steam store, once, and uses the cover if the title matches. Nothing else is sent. You can always set a cover yourself.")
             }
+            Section {
+                Toggle("Download the newest engine builds", isOn: $newestEngines)
+            } footer: {
+                Text("Off: Wine, DXMT and the engines come in the versions this Decanter was tested with. On: the newest upstream builds, untested. It applies to the next setup or engine download; engines already installed stay as they are.")
+            }
         }
         .formStyle(.grouped)
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
         .onChange(of: autoCovers) { _, enabled in
             if enabled { model.fetchMissingCovers() }
+        }
+        .onChange(of: newestEngines) { _, newest in
+            EngineBuilds.useNewest = newest
         }
     }
 }

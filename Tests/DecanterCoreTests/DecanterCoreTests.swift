@@ -1231,6 +1231,32 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(Duration.milliseconds(200).spokenLength, "0 seconds")
     }
 
+    func testEngineBuildsArePinnedByNameAndChecksum() async throws {
+        for pin in EngineBuilds.all {
+            XCTAssertEqual(pin.asset.sha256, pin.sha256, pin.file)
+            XCTAssertEqual(pin.url.absoluteString,
+                           "https://github.com/\(pin.repo)/releases/download/\(pin.release)/\(pin.file)")
+        }
+        XCTAssertEqual(Set(EngineBuilds.all.map(\.sha256)).count, EngineBuilds.all.count)
+        // The engines' versions name their folders, as the newest-build lookup names them.
+        for pin in [EngineBuilds.crossOver, EngineBuilds.wine10] {
+            XCTAssertEqual(pin.version + ".tar.xz", pin.file)
+        }
+        XCTAssertTrue(EngineBuilds.crossOver.file.hasPrefix(RuntimeManager.crossoverPrefix))
+        XCTAssertTrue(EngineBuilds.wine10.file.hasPrefix(RuntimeManager.sikarugirPrefix))
+
+        // By default the pin is used, without asking GitHub anything.
+        let saved = EngineBuilds.useNewest
+        defer { EngineBuilds.useNewest = saved }
+        EngineBuilds.useNewest = false
+        let pinned = try await RuntimeManager.build(EngineBuilds.wine) { throw DecanterError("looked upstream") }
+        XCTAssertEqual(pinned.tag, "11.21")
+        XCTAssertEqual(pinned.asset.name, "wine-staging-11.21-osx64.tar.xz")
+        EngineBuilds.useNewest = true
+        let newest = try await RuntimeManager.build(EngineBuilds.wine) { ("12.0", self.asset("wine-staging-12.0.tar.xz", digest: nil)) }
+        XCTAssertEqual(newest.tag, "12.0")
+    }
+
     /// Hands out one process list per call, repeating the last.
     private final class FakeProcesses: @unchecked Sendable {
         private var lists: [[String]]
