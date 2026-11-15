@@ -1073,6 +1073,104 @@ final class DecanterCoreTests: XCTestCase {
         }
     }
 
+    private func steamGame(program: String, prefix: URL) -> Game {
+        let steam = prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam")
+        var game = Game(name: "Rise", executablePath: steam.appendingPathComponent("steam.exe").path, bottleID: UUID())
+        game.steamAppID = 287450
+        game.iconPath = steam.appendingPathComponent("steamapps/common/\(program)").path
+        return game
+    }
+
+    func testSteamGamesAreFollowedByTheirOwnProcesses() throws {
+        let prefix = URL(fileURLWithPath: "/D/Bottles/X/prefix")
+        let game = steamGame(program: "Rise of Nations/riseofnations.exe", prefix: prefix)
+        let watch = try XCTUnwrap(GameProcesses.watch(for: game, prefix: prefix))
+        XCTAssertEqual(watch.name, "riseofnations.exe")
+
+        let match = { GameProcesses.matches($0, watch) }
+        XCTAssertTrue(match(#"C:\Program Files (x86)\Steam\steamapps\common\Rise of Nations\riseofnations.exe -nointro"#))
+        XCTAssertTrue(match(#"/rt/bin/wine-preloader "C:\PROGRAM FILES (X86)\STEAM\STEAMAPPS\COMMON\RISE OF NATIONS\RiseOfNations.exe""#))
+        // Anything from the game's folder: Unreal's stub starts a Shipping program in a subfolder.
+        XCTAssertTrue(match(#"C:\Program Files (x86)\Steam\steamapps\common\Rise of Nations\Bin\Win64\Rise-Shipping.exe"#))
+        XCTAssertTrue(match("riseofnations.exe"))
+        XCTAssertFalse(match(#"C:\Games\myriseofnations.exe"#))
+        XCTAssertFalse(match(#"C:\Games\riseofnations.exe.bak"#))
+        XCTAssertFalse(match(#"C:\Program Files (x86)\Steam\steam.exe -applaunch 287450"#))
+        XCTAssertFalse(match(#"C:\windows\system32\winedevice.exe"#))
+
+        // Games that aren't started through Steam are followed by the process Decanter starts.
+        var plain = game
+        plain.steamAppID = nil
+        plain.executablePath = game.iconPath!
+        XCTAssertNil(GameProcesses.watch(for: plain, prefix: prefix))
+        // Without the game's own program there is nothing to follow but Steam.
+        var unknown = game
+        unknown.iconPath = nil
+        XCTAssertNil(GameProcesses.watch(for: unknown, prefix: prefix))
+        // A program loose in Steam's folder is matched by name only.
+        let loose = steamGame(program: "../game.exe", prefix: prefix)
+        XCTAssertEqual(GameProcesses.watch(for: loose, prefix: prefix)?.folders, [])
+    }
+
+    func testAHandMadeApplaunchGameIsFollowedThroughSteamsManifest() throws {
+        let prefix = try temporaryFolder().appendingPathComponent("prefix")
+        let steam = prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam")
+        let steamapps = steam.appendingPathComponent("steamapps")
+        try FileManager.default.createDirectory(at: steamapps.appendingPathComponent("common/Rise of Nations"),
+                                                withIntermediateDirectories: true)
+        try """
+        "AppState" { "appid" "287450" "name" "Rise of Nations: Extended Edition" "installdir" "Rise of Nations" "StateFlags" "4" }
+        """.write(to: steamapps.appendingPathComponent("appmanifest_287450.acf"), atomically: true, encoding: .utf8)
+
+        // Set up by hand: Steam's program and the launch arguments, nothing else.
+        var game = Game(name: "Rise", executablePath: steam.appendingPathComponent("steam.exe").path, bottleID: UUID())
+        game.settings.arguments = "-applaunch 287450"
+        let watch = try XCTUnwrap(GameProcesses.watch(for: game, prefix: prefix))
+        XCTAssertEqual(watch.name, "")
+        XCTAssertTrue(GameProcesses.matches(#"C:\Program Files (x86)\Steam\steamapps\common\Rise of Nations\patriots.exe"#, watch))
+        XCTAssertFalse(GameProcesses.matches(#"C:\Program Files (x86)\Steam\steam.exe -applaunch 287450"#, watch))
+        XCTAssertFalse(GameProcesses.matches("patriots.exe", watch))
+
+        // An app Steam hasn't installed in this bottle leaves nothing to follow.
+        game.settings.arguments = "-applaunch 999"
+        XCTAssertNil(GameProcesses.watch(for: game, prefix: prefix))
+    }
+
+    /// Hands out one process list per call, repeating the last.
+    private final class FakeProcesses: @unchecked Sendable {
+        private var lists: [[String]]
+        private let lock = NSLock()
+        init(_ lists: [[String]]) { self.lists = lists }
+        func next() -> [String] {
+            lock.lock(); defer { lock.unlock() }
+            return lists.count > 1 ? lists.removeFirst() : lists[0]
+        }
+    }
+
+    func testASteamSessionLastsWhileTheGameRuns() async {
+        let watch = GameProcesses.Watch(name: "game.exe", folders: [])
+        let game = #"C:\Games\game.exe"#, steam = #"C:\Steam\steam.exe"#
+        // Steam first, then the game, a gap while its launcher hands over, more game, then gone.
+        let fake = FakeProcesses([[steam], [steam], [game], [game], [], [game], [game], [], [], []])
+        let played = await GameProcesses.waitForSession(of: watch, poll: .milliseconds(10),
+                                                        commandLines: { fake.next() })
+        let seconds = try? XCTUnwrap(played)
+        XCTAssertNotNil(seconds)
+        // Started on the third list and last seen on the seventh: about four polls.
+        XCTAssertGreaterThan(seconds ?? 0, 0.03)
+        XCTAssertLessThan(seconds ?? 1, 0.5)
+    }
+
+    func testASteamGameThatNeverStartsEndsTheWait() async {
+        let watch = GameProcesses.Watch(name: "game.exe", folders: [])
+        let gaveUp = await GameProcesses.waitForSession(of: watch, appearWithin: .milliseconds(50),
+                                                        poll: .milliseconds(10), commandLines: { [] })
+        XCTAssertNil(gaveUp)
+        let stopped = await GameProcesses.waitForSession(of: watch, poll: .milliseconds(10),
+                                                         stillStarting: { false }, commandLines: { [] })
+        XCTAssertNil(stopped)
+    }
+
     func testProgramInsideABottlePrefixBelongsToThatBottle() {
         let crossoverPrefix = UUID(), winePrefix = UUID()
         let game = Bottle(name: "Game", prefixes: [Engine.crossover.rawValue: crossoverPrefix,

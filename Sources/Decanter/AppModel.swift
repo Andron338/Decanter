@@ -703,14 +703,19 @@ final class AppModel {
                     self.fillingScreen.remove(id)
                     if self.fillingScreen.isEmpty { DisplayFit.restore() }
                 }
+                // A game Steam starts is followed by its own processes: steam.exe either hands it to
+                // a running Steam and quits at once, or is Steam and outlives the game.
+                let watch = GameProcesses.watch(for: launched, prefix: prefix)
                 do {
                     _ = try Launcher.start(Launcher.plan(game: launched, prefix: prefix, runtime: runtime), log: logURL(for: game)) { status in
                         Task { @MainActor in
+                            // Steam just quit, perhaps after downloading something.
+                            self.findSteamGames()
+                            // The game's own processes end its session (below).
+                            guard watch == nil else { return }
                             restoreScreen()
                             self.running.remove(id)
                             self.addPlayTime(Date().timeIntervalSince(started), to: id)
-                            // Steam just quit, perhaps after downloading something.
-                            self.findSteamGames()
                             if status != 0 && Date().timeIntervalSince(started) < 10 {
                                 self.errorMessage = "\(game.name) quit right after starting. "
                                     + "Open its settings to try a different renderer or a fixed-size window, or check the log."
@@ -720,6 +725,16 @@ final class AppModel {
                 } catch {
                     restoreScreen()
                     throw error
+                }
+                if let watch {
+                    let launchedAt = Date()
+                    let played = await GameProcesses.waitForSession(of: watch, stillStarting: {
+                        // Give Wine a moment to start its server before taking its absence as "stopped".
+                        Date().timeIntervalSince(launchedAt) < 15 || Launcher.wineIsRunning(in: prefix)
+                    })
+                    restoreScreen()
+                    running.remove(id)
+                    if let played { addPlayTime(played, to: id) }
                 }
             } catch {
                 running.remove(id)
