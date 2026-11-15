@@ -399,12 +399,20 @@ public enum RuntimeManager {
         return runtime
     }
 
-    /// One release of the engines repository holds every build; the newest of a line sorts last.
     private static func newestEngine(named prefix: String, label: String) async throws -> (tag: String, asset: GitHubRelease.Asset) {
-        let assets = try await GitHub.releases(crossoverRepo).flatMap(\.assets)
-            .filter { $0.name.hasPrefix(prefix) && $0.name.hasSuffix(".tar.xz") }
+        guard let found = newestEngine(named: prefix, in: try await GitHub.releases(crossoverRepo)) else {
+            throw DecanterError("No \(label) engine with a checksum to verify it by was found in \(crossoverRepo).")
+        }
+        return found
+    }
+
+    /// One release of the engines repository holds every build; the newest of a line sorts last.
+    /// Builds without a checksum (uploaded before GitHub kept them) are passed over.
+    static func newestEngine(named prefix: String, in releases: [GitHubRelease]) -> (tag: String, asset: GitHubRelease.Asset)? {
+        let assets = releases.flatMap(\.assets)
+            .filter { $0.name.hasPrefix(prefix) && $0.name.hasSuffix(".tar.xz") && $0.sha256 != nil }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        guard let asset = assets.last else { throw DecanterError("No \(label) engine found in \(crossoverRepo).") }
+        guard let asset = assets.last else { return nil }
         return (String(asset.name.dropLast(".tar.xz".count)), asset)
     }
 
@@ -527,12 +535,23 @@ public enum RuntimeManager {
     private static func latestAsset(
         repo: String, matching: (String) -> Bool
     ) async throws -> (tag: String, asset: GitHubRelease.Asset) {
-        for release in try await GitHub.releases(repo) where !release.prerelease {
-            if let asset = release.assets.first(where: { matching($0.name) }) {
+        guard let found = latestAsset(in: try await GitHub.releases(repo), matching: matching) else {
+            throw DecanterError("No download with a checksum to verify it by was found in \(repo).")
+        }
+        return found
+    }
+
+    /// The newest full release's matching asset. Releases whose asset has no checksum (uploaded
+    /// before GitHub kept them) are passed over for an older one that has.
+    static func latestAsset(
+        in releases: [GitHubRelease], matching: (String) -> Bool
+    ) -> (tag: String, asset: GitHubRelease.Asset)? {
+        for release in releases where !release.prerelease {
+            if let asset = release.assets.first(where: { matching($0.name) && $0.sha256 != nil }) {
                 return (release.tag_name, asset)
             }
         }
-        throw DecanterError("No suitable download found in \(repo).")
+        return nil
     }
 
     private static func fetch(
@@ -542,13 +561,15 @@ public enum RuntimeManager {
         try await Downloader.download(from: asset.browser_download_url, to: archive) {
             progress(.init(stage: label, fraction: $0))
         }
-        if let digest = asset.digest, digest.hasPrefix("sha256:") {
-            progress(.init(stage: "Verifying download…", fraction: nil))
-            let actual = try Checksum.sha256(of: archive)
-            guard actual == digest.dropFirst("sha256:".count) else {
-                try? FileManager.default.removeItem(at: archive)
-                throw DecanterError("\(asset.name) failed its checksum — the download was corrupted or tampered with.")
-            }
+        // Nothing is installed unchecked: the asset was picked for having a checksum.
+        guard let expected = asset.sha256 else {
+            try? FileManager.default.removeItem(at: archive)
+            throw DecanterError("\(asset.name) has no checksum to verify it by, so it wasn't installed.")
+        }
+        progress(.init(stage: "Verifying download…", fraction: nil))
+        guard try Checksum.sha256(of: archive) == expected else {
+            try? FileManager.default.removeItem(at: archive)
+            throw DecanterError("\(asset.name) failed its checksum — the download was corrupted or tampered with.")
         }
     }
 

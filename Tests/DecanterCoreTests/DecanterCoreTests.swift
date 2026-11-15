@@ -1136,6 +1136,39 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertNil(GameProcesses.watch(for: game, prefix: prefix))
     }
 
+    private func asset(_ name: String, digest: String?) -> GitHubRelease.Asset {
+        GitHubRelease.Asset(name: name, size: 1, browser_download_url: URL(string: "https://example.invalid/\(name)")!,
+                            digest: digest)
+    }
+
+    func testOnlyDownloadsWithAChecksumArePicked() {
+        let good = "sha256:" + String(repeating: "ab", count: 32)
+        XCTAssertEqual(asset("a", digest: good).sha256, String(repeating: "ab", count: 32))
+        XCTAssertEqual(asset("a", digest: good.uppercased()).sha256, String(repeating: "ab", count: 32))
+        XCTAssertNil(asset("a", digest: nil).sha256)
+        XCTAssertNil(asset("a", digest: "sha1:" + String(repeating: "ab", count: 20)).sha256)
+        XCTAssertNil(asset("a", digest: "sha256:abc").sha256)
+        XCTAssertNil(asset("a", digest: "sha256:" + String(repeating: "zz", count: 32)).sha256)
+
+        // The newest release has no checksum, so the one before it is used; prereleases never are.
+        let releases = [
+            GitHubRelease(tag_name: "12.0-rc", prerelease: true, assets: [asset("wine-staging-12.0-rc.tar.xz", digest: good)]),
+            GitHubRelease(tag_name: "11.22", prerelease: false, assets: [asset("wine-staging-11.22.tar.xz", digest: nil)]),
+            GitHubRelease(tag_name: "11.21", prerelease: false, assets: [asset("wine-staging-11.21.tar.xz", digest: good)]),
+        ]
+        XCTAssertEqual(RuntimeManager.latestAsset(in: releases) { $0.hasPrefix("wine-staging-") }?.tag, "11.21")
+        XCTAssertNil(RuntimeManager.latestAsset(in: Array(releases.prefix(2))) { $0.hasPrefix("wine-staging-") })
+
+        let engines = [GitHubRelease(tag_name: "v1.0", prerelease: false, assets: [
+            asset("WS12WineCX24.0.7_6.tar.xz", digest: good),
+            asset("WS12WineCX24.0.7_10.tar.xz", digest: nil),
+            asset("WS12WineCX24.0.7_7.tar.xz", digest: good),
+            asset("WS12WineSikarugir10.0_8.tar.xz", digest: good),
+        ])]
+        XCTAssertEqual(RuntimeManager.newestEngine(named: "WS12WineCX", in: engines)?.tag, "WS12WineCX24.0.7_7")
+        XCTAssertNil(RuntimeManager.newestEngine(named: "WS12WineSikarugir11", in: engines))
+    }
+
     /// Hands out one process list per call, repeating the last.
     private final class FakeProcesses: @unchecked Sendable {
         private var lists: [[String]]

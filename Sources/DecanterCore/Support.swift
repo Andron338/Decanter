@@ -165,6 +165,13 @@ struct GitHubRelease: Decodable {
         let size: Int
         let browser_download_url: URL
         let digest: String?
+
+        /// The asset's SHA-256 in lowercase hex, from GitHub's `sha256:…` digest; nil without one.
+        var sha256: String? {
+            guard let digest, digest.lowercased().hasPrefix("sha256:") else { return nil }
+            let hex = digest.dropFirst("sha256:".count).lowercased()
+            return hex.count == 64 && hex.allSatisfy(\.isHexDigit) ? hex : nil
+        }
     }
     let tag_name: String
     let prerelease: Bool
