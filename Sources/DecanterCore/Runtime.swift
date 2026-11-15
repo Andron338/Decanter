@@ -44,12 +44,19 @@ public enum Wine10Graphics: String, Codable, CaseIterable, Identifiable, Sendabl
     case vkd3d
     /// Wine's own renderers for everything (wined3d), as before.
     case wine
+    /// Direct3D 11/12 → Apple's D3DMetal → Metal, from the Game Porting Toolkit download. The Wine 10
+    /// engine's loader takes it like the other backends, so Steam needn't move to Apple's older Wine,
+    /// which it crashes on. Falls back to vkd3d when D3DMetal isn't installed.
+    case d3dmetal
 
     public var id: String { rawValue }
 
     public func resolved(for requirements: GameRequirements?) -> Wine10Graphics {
         guard self == .automatic else { return self }
-        guard let directX = requirements?.directX, !directX.isEmpty else { return .metal }
+        guard let requirements, !requirements.directX.isEmpty else { return .metal }
+        let directX = requirements.directX
+        // DXMT replaces DXGI, which leaves a game that needs Direct3D 12 with none at all.
+        if requirements.requiresD3D12 { return .d3dmetal }
         if directX.contains(10) || directX.contains(11) { return .metal }
         return directX.contains(12) ? .vkd3d : .wine
     }
@@ -118,10 +125,56 @@ public struct InstalledRuntime: Codable, Equatable {
         switch graphics {
         case .metal, .automatic:
             if let dxmtRoot { env["WINEDLLPATH_DXMT"] = dxmtRoot.path }
+        case .d3dmetal:
+            if let d3dMetal = d3dMetalComponent() {
+                env["WINEDLLPATH_D3DMETAL"] = d3dMetal.root.path
+                env["CX_APPLEGPTK_LIBD3DSHARED_PATH"] = d3dMetal.shared.path
+            }
         case .wine, .vkd3d:
             break
         }
         return env
+    }
+
+    /// D3DMetal's DLLs, which Apple ships as Wine builtins with a Mac-side half each.
+    static let d3dMetalDLLs = ["d3d10", "d3d10core", "d3d11", "d3d12", "dxgi", "nvapi64", "nvngx", "atidxx64"]
+
+    /// A folder of links to the Game Porting Toolkit's D3DMetal files laid out as the Wine 10 engine's
+    /// loader wants a backend (`x86_64-windows`, `x86_64-unix`), made the first time it's needed.
+    /// The Mac halves find `libd3dshared.dylib` and `D3DMetal.framework` beside themselves.
+    public func d3dMetalComponent() -> (root: URL, shared: URL)? {
+        guard let gptkPath, let gptkTag else { return nil }
+        let lib = URL(fileURLWithPath: gptkPath).appendingPathComponent("lib")
+        let external = lib.appendingPathComponent("external")
+        let root = Paths.components.appendingPathComponent("d3dmetal-\(gptkTag)", isDirectory: true)
+        let windows = root.appendingPathComponent("x86_64-windows"), unix = root.appendingPathComponent("x86_64-unix")
+        let shared = unix.appendingPathComponent("libd3dshared.dylib")
+        let fm = FileManager.default
+        if fm.fileExists(atPath: shared.path) { return (root, shared) }
+        guard fm.fileExists(atPath: external.appendingPathComponent("libd3dshared.dylib").path) else { return nil }
+        try? fm.removeItem(at: root)
+        do {
+            try fm.createDirectory(at: windows, withIntermediateDirectories: true)
+            try fm.createDirectory(at: unix, withIntermediateDirectories: true)
+            for dll in Self.d3dMetalDLLs {
+                let pe = lib.appendingPathComponent("wine/x86_64-windows/\(dll).dll")
+                let so = lib.appendingPathComponent("wine/x86_64-unix/\(dll).so")
+                if fm.fileExists(atPath: pe.path) {
+                    try fm.createSymbolicLink(at: windows.appendingPathComponent("\(dll).dll"), withDestinationURL: pe)
+                }
+                if fm.fileExists(atPath: so.path) {
+                    try fm.createSymbolicLink(at: unix.appendingPathComponent("\(dll).so"), withDestinationURL: so)
+                }
+            }
+            try fm.createSymbolicLink(at: unix.appendingPathComponent("D3DMetal.framework"),
+                                      withDestinationURL: external.appendingPathComponent("D3DMetal.framework"))
+            // Last, as the sign that the folder is complete.
+            try fm.createSymbolicLink(at: shared, withDestinationURL: external.appendingPathComponent("libd3dshared.dylib"))
+        } catch {
+            try? fm.removeItem(at: root)
+            return nil
+        }
+        return (root, shared)
     }
 
     public func has(_ engine: Engine) -> Bool {

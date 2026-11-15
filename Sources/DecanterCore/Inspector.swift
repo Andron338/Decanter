@@ -12,6 +12,12 @@ public struct GameRequirements: Codable, Equatable, Sendable {
     /// True when the import table was nearly empty (packed/protected exe) and DLL names
     /// were recovered from strings in the file instead, which is less certain.
     public var guessedFromStrings: Bool
+    /// True when the game ships Microsoft's D3D12 Agility SDK (`D3D12/D3D12Core.dll`), which only
+    /// a game built around Direct3D 12 does: Unreal Engine 5 games that refuse to start without it.
+    /// Optional so entries saved before it existed still decode.
+    public var bundlesD3D12: Bool?
+
+    public var requiresD3D12: Bool { bundlesD3D12 == true && directX.contains(12) }
 
     public var graphicsSummary: String {
         var parts: [String] = []
@@ -30,6 +36,7 @@ public struct GameRequirements: Codable, Equatable, Sendable {
 
     /// nil when nothing useful was detected and the default should stand.
     public var recommendedRenderer: Renderer? {
+        if requiresD3D12 { return .d3dmetal }
         if directX.contains(10) || directX.contains(11) { return .metal }
         if directX.contains(12) { return .d3dmetal }
         // DirectX 9 and older, and 32-bit games in general, are where current Wine is weakest on
@@ -42,7 +49,8 @@ public struct GameRequirements: Codable, Equatable, Sendable {
 
 public enum ExecutableInspector {
     /// Inspects the exe and the DLLs sitting next to it (engines like Unity keep the renderer in a DLL).
-    public static func inspect(_ executable: URL) -> GameRequirements? {
+    public static func inspect(_ program: URL) -> GameRequirements? {
+        let executable = unrealGame(launchedBy: program) ?? program
         guard let image = PEImage(url: executable) else { return nil }
         var names = image.importedLibraries
         var runtimes = Set<String>()
@@ -70,6 +78,10 @@ public enum ExecutableInspector {
             names.formUnion(found)
         }
 
+        let agility = folder.appendingPathComponent("D3D12/D3D12Core.dll")
+        let bundlesD3D12 = !isSystemFolder && FileManager.default.fileExists(atPath: agility.path)
+        if bundlesD3D12 { names.insert("d3d12core.dll") }
+
         var versions = Set<Int>()
         for name in names {
             if let version = directXVersion(of: name) { versions.insert(version) }
@@ -81,7 +93,17 @@ public enum ExecutableInspector {
             usesOpenGL: names.contains("opengl32.dll"),
             usesVulkan: names.contains("vulkan-1.dll"),
             runtimes: runtimes.sorted(),
-            guessedFromStrings: guessed)
+            guessedFromStrings: guessed,
+            bundlesD3D12: bundlesD3D12 ? true : nil)
+    }
+
+    /// The real game behind an Unreal Engine launcher stub: `Game.exe` only checks for the runtime
+    /// and starts `Game/Binaries/Win64/Game-Win64-Shipping.exe`, which is what uses the graphics.
+    static func unrealGame(launchedBy stub: URL) -> URL? {
+        let name = stub.deletingPathExtension().lastPathComponent
+        let game = stub.deletingLastPathComponent()
+            .appendingPathComponent("\(name)/Binaries/Win64/\(name)-Win64-Shipping.exe")
+        return FileManager.default.fileExists(atPath: game.path) ? game : nil
     }
 
     static func isGraphicsLibrary(_ name: String) -> Bool {

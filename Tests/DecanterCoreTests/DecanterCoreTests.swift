@@ -866,4 +866,65 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(String(decoding: icon.dropFirst(22), as: UTF8.self), "bigger")
         XCTAssertNil(PEImage(data: makePE(is64Bit: true, imports: ["d3d11.dll"]))?.iconFile)
     }
+
+    func testVisualCppIsReadFromTheRegistryFile() {
+        let both = """
+        [Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\X64] 1794705046
+        #time=1dd749e2531c3c6
+        "Bld"=dword:00008d97
+        "Installed"=dword:00000001
+
+        [Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\x86] 1794705041
+        "Installed"=dword:00000001
+        """
+        XCTAssertTrue(VisualCpp.isInstalled(registry: both, arch: "x64"))
+        XCTAssertTrue(VisualCpp.isInstalled(registry: both, arch: "x86"))
+        // The 2012 runtime's key, or the key without "Installed", doesn't count.
+        let old = """
+        [Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio\\\\11.0\\\\VC\\\\Runtimes\\\\x86] 1
+        "Installed"=dword:00000001
+        [Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\X64] 1
+        "Bld"=dword:00008d97
+        [Software\\\\Wine] 1
+        "Installed"=dword:00000001
+        """
+        XCTAssertFalse(VisualCpp.isInstalled(registry: old, arch: "x64"))
+        XCTAssertFalse(VisualCpp.isInstalled(registry: old, arch: "x86"))
+    }
+
+    func testSteamGamesAndVisualCppProgramsNeedTheRuntime() {
+        var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
+        XCTAssertFalse(VisualCpp.isNeeded(by: game))
+        game.requirements = GameRequirements(is64Bit: true, directX: [12], usesOpenGL: false, usesVulkan: false,
+                                             runtimes: ["Visual C++ 2015+"], guessedFromStrings: false)
+        XCTAssertTrue(VisualCpp.isNeeded(by: game))
+        var steam = Game(name: "S", executablePath: "/b/Steam/steam.exe", bottleID: UUID())
+        steam.steamAppID = 1643320
+        XCTAssertTrue(VisualCpp.isNeeded(by: steam))
+    }
+
+    func testGamesBundlingTheD3D12AgilitySDKGetDirect3D12() {
+        let dx11and12 = GameRequirements(is64Bit: true, directX: [11, 12], usesOpenGL: false, usesVulkan: false,
+                                         runtimes: [], guessedFromStrings: false)
+        XCTAssertEqual(Wine10Graphics.automatic.resolved(for: dx11and12), .metal)
+        var agility = dx11and12
+        agility.bundlesD3D12 = true
+        XCTAssertEqual(Wine10Graphics.automatic.resolved(for: agility), .d3dmetal)
+        XCTAssertEqual(agility.recommendedRenderer, .d3dmetal)
+        XCTAssertEqual(Wine10Graphics.metal.resolved(for: agility), .metal)
+    }
+
+    func testUnrealLauncherStubLeadsToTheShippingProgram() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let win64 = root.appendingPathComponent("Game/Binaries/Win64")
+        try FileManager.default.createDirectory(at: win64.appendingPathComponent("D3D12"), withIntermediateDirectories: true)
+        let stub = root.appendingPathComponent("Game.exe")
+        try makePE(is64Bit: true, imports: ["kernel32.dll"]).write(to: stub)
+        try makePE(is64Bit: true, imports: ["d3d11.dll", "d3d12.dll"]).write(to: win64.appendingPathComponent("Game-Win64-Shipping.exe"))
+        try Data().write(to: win64.appendingPathComponent("D3D12/D3D12Core.dll"))
+        let found = try XCTUnwrap(ExecutableInspector.inspect(stub))
+        XCTAssertEqual(found.directX, [11, 12])
+        XCTAssertTrue(found.requiresD3D12)
+    }
 }

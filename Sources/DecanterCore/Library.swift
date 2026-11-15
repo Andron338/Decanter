@@ -96,9 +96,12 @@ public struct Game: Codable, Identifiable, Equatable {
     public var isFavorite: Bool { favorite ?? false }
     public var playTime: TimeInterval { playSeconds ?? 0 }
 
+    /// The program that is the game: for a Steam game, the one in its folder rather than `steam.exe`.
+    public var programPath: String { steamAppID != nil ? (iconPath ?? executablePath) : executablePath }
+
     /// Reads the executable and, when `chooseRenderer` is set, switches to the renderer that suits it.
     public mutating func inspect(chooseRenderer: Bool) {
-        requirements = ExecutableInspector.inspect(URL(fileURLWithPath: executablePath))
+        requirements = ExecutableInspector.inspect(URL(fileURLWithPath: programPath))
         if chooseRenderer, let renderer = requirements?.recommendedRenderer {
             settings.renderer = renderer
         }

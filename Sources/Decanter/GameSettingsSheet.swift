@@ -227,6 +227,7 @@ struct GameSettingsSheet: View {
                         Text("Automatic").tag(Wine10Graphics.automatic)
                         Text("DXMT (DirectX 10, 11)").tag(Wine10Graphics.metal)
                         Text("vkd3d (DirectX 12)").tag(Wine10Graphics.vkd3d)
+                        Text("D3DMetal (DirectX 11, 12)").tag(Wine10Graphics.d3dmetal)
                         Text("Wine's own").tag(Wine10Graphics.wine)
                     } label: {
                         Text("DirectX")
@@ -294,11 +295,14 @@ struct GameSettingsSheet: View {
 
     private var wine10Explanation: String {
         let route = Launcher.wine10Graphics(for: game)
-        let automatic = game.settings.wine10Graphics == .automatic ? "Using \(route == .vkd3d ? "vkd3d" : "DXMT") for this game. " : ""
+        let automatic = game.settings.wine10Graphics == .automatic ? "Using \(route == .vkd3d ? "vkd3d" : route == .d3dmetal ? "D3DMetal" : "DXMT") for this game. " : ""
         let steam = game.steamAppID != nil ? " If Steam is already running with the other choice, it restarts first." : ""
         switch route {
         case .vkd3d:
             return automatic + "DirectX 12 through vkd3d on MoltenVK. DirectX 9, 10 and 11 use Wine's own renderer." + steam
+        case .d3dmetal:
+            return automatic + "DirectX 11 and 12 through Apple's D3DMetal, from the Game Porting Toolkit download"
+                + " (vkd3d stands in until that's installed). DirectX 9 uses Wine's own renderer." + steam
         case .wine:
             return (game.settings.wine10Graphics == .automatic ? "Using Wine's own for this older game. " : "")
                 + "Wine's own renderer for every DirectX version." + steam

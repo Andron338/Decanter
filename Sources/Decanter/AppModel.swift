@@ -121,7 +121,9 @@ final class AppModel {
     private static func loadLibrary() -> [Game] {
         var games = LibraryStore.load()
         var changed = false
-        for index in games.indices where games[index].requirements == nil {
+        // Steam games were once inspected through steam.exe or Unreal's launcher stub, which name no graphics.
+        for index in games.indices where games[index].requirements == nil
+            || (games[index].steamAppID != nil && games[index].requirements?.directX.isEmpty == true) {
             games[index].inspect(chooseRenderer: games[index].settings == GameSettings())
             changed = changed || games[index].requirements != nil
         }
@@ -666,6 +668,7 @@ final class AppModel {
                     LibraryStore.save(games)
                 }
                 await matchSteamRouting(for: game, prefix: prefix, runtime: runtime)
+                await installVisualCppIfNeeded(for: game, prefix: prefix, runtime: runtime)
                 await Launcher.applyRegistrySettings(game: game, prefix: prefix, runtime: runtime)
                 // Fill the screen: the Mac drops to the resolution that best fits the window, and the
                 // Windows desktop takes that size, leaving the game's own resolution to size the window.
@@ -735,6 +738,36 @@ final class AppModel {
             return
         }
         Launcher.recordRouting(wanted, in: prefix)
+    }
+
+    /// Puts Microsoft's Visual C++ runtime into the game's prefix the first time a game there needs
+    /// it. A failure is left to the game to report: many run on Wine's own copy of the runtime.
+    private func installVisualCppIfNeeded(for game: Game, prefix: URL, runtime: InstalledRuntime) async {
+        guard VisualCpp.isNeeded(by: game) else { return }
+        let installed = VisualCpp.isInstalled(in: prefix)
+        guard !installed || !VisualCpp.prefersNative(in: prefix) else { return }
+        let previous = busyMessage
+        busyMessage = "Installing the Visual C++ runtime (one time per bottle)…"
+        defer { busyMessage = previous }
+        let engine = runtime.engine(for: game.settings.renderer)
+        let env = Launcher.environment(prefix: prefix, settings: GameSettings(), engine: engine, quiet: true,
+                                       libraryFallback: runtime.libraryFallback(for: engine))
+        let wine = runtime.wine(for: game.settings.renderer)
+        do {
+            if !installed {
+                try await VisualCpp.install(in: prefix, wine: wine, environment: env) { progress in
+                    Task { @MainActor in
+                        guard self.busyMessage != nil else { return }
+                        let percent = progress.fraction.map { " \(Int($0 * 100))%" } ?? ""
+                        self.busyMessage = progress.stage + percent
+                    }
+                }
+            }
+            try await VisualCpp.preferNative(in: prefix, wine: wine, environment: env)
+        } catch {
+            try? ("Visual C++ runtime: \(error.localizedDescription)\n").write(
+                to: Paths.logs.appendingPathComponent("visual-cpp.log"), atomically: true, encoding: .utf8)
+        }
     }
 
     private static func startsSteam(_ game: Game) -> Bool {
