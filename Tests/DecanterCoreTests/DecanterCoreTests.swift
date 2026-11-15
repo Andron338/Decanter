@@ -927,4 +927,18 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(found.directX, [11, 12])
         XCTAssertTrue(found.requiresD3D12)
     }
+
+    func testD3DMetalOptionsReachTheWine10D3DMetalRoute() {
+        var settings = GameSettings()
+        settings.metalFX = true
+        settings.rayTracing = true
+        let d3dMetal = Launcher.environment(prefix: prefix, settings: settings, engine: .sikarugir,
+                                            graphics: ["WINEDLLPATH_D3DMETAL": "/c/d3dmetal"])
+        XCTAssertEqual(d3dMetal["D3DM_ENABLE_METALFX"], "1")
+        XCTAssertEqual(d3dMetal["D3DM_SUPPORT_DXR"], "1")
+        XCTAssertNil(d3dMetal["WINEESYNC"])
+        let dxmt = Launcher.environment(prefix: prefix, settings: settings, engine: .sikarugir,
+                                        graphics: ["WINEDLLPATH_DXMT": "/c/dxmt"])
+        XCTAssertNil(dxmt["D3DM_ENABLE_METALFX"])
+    }
 }

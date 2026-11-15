@@ -240,6 +240,16 @@ struct GameSettingsSheet: View {
                          : "Runs on CrossOver's Wine 9. Decanter downloads it (about 165 MB) the first time you press Play.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                if game.settings.renderer == .sikarugir, Launcher.wine10Graphics(for: game) == .d3dmetal,
+                   model.runtime?.hasD3DMetal == true {
+                    Toggle("Ray tracing (DXR)", isOn: $game.settings.rayTracing)
+                    Toggle("DLSS through MetalFX", isOn: $game.settings.metalFX)
+                    Toggle("Report AVX support to the game", isOn: $game.settings.advertiseAVX)
+                    if game.steamAppID != nil {
+                        Text("Steam passes these to its games when it starts, so quit Steam after changing them.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 if game.settings.renderer == .d3dmetal {
                     if model.runtime?.hasD3DMetal == true {
                         Toggle("Ray tracing (DXR)", isOn: $game.settings.rayTracing)

@@ -25,9 +25,11 @@ public enum Launcher {
         if let language = WindowsLanguage.resolve(settings.language, preferred: preferredLanguages) {
             env["LC_ALL"] = language.locale + ".UTF-8"
         }
-        if engine == .gptk {
+        // D3DMetal reads its options from the environment, on Apple's Wine and on the Wine 10 engine's
+        // D3DMetal route alike. A game Steam starts gets them from Steam's launch, which this also is.
+        if engine == .gptk || graphics["WINEDLLPATH_D3DMETAL"] != nil {
             // Apple's Wine predates MSync in some builds; ESync is what Apple's own instructions use.
-            if settings.fastSync { env["WINEESYNC"] = "1" }
+            if engine == .gptk && settings.fastSync { env["WINEESYNC"] = "1" }
             if settings.rayTracing { env["D3DM_SUPPORT_DXR"] = "1" }
             if settings.metalFX { env["D3DM_ENABLE_METALFX"] = "1" }
             if settings.advertiseAVX { env["ROSETTA_ADVERTISE_AVX"] = "1" }
