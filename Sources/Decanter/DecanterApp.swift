@@ -158,6 +158,11 @@ struct GameCommands: Commands {
             Button("New Category…") { model.namingCategory = game }
                 .disabled(game == nil)
             Divider()
+            Button("Open Game Folder") {
+                if let game { model.openGameFolder(game) }
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
+            .disabled(game == nil)
             Button("Show Program in Finder") {
                 if let game { model.showInFinder(game) }
             }

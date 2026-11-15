@@ -214,7 +214,8 @@ struct GameMenu: View {
             }
         }
         Divider()
-        Button("Show Program in Finder", systemImage: "folder") { model.showInFinder(game) }
+        Button("Open Game Folder", systemImage: "folder") { model.openGameFolder(game) }
+        Button("Show Program in Finder", systemImage: "magnifyingglass") { model.showInFinder(game) }
         Button("Open C: Drive", systemImage: "externaldrive") { model.openDriveC(game) }
         Button("Show Log", systemImage: "doc.text") { model.showLog(game) }
         Divider()

@@ -189,6 +189,12 @@ final class AppModel {
     /// Adds a game that is already installed (or portable) somewhere on disk. Its bottle's prefix is
     /// made the first time it is played.
     private func addExecutable(_ url: URL, bottleID: UUID? = nil, engine: Engine? = nil) {
+        var bottleID = bottleID, engine = engine
+        // A program dropped from inside a bottle's drive_c belongs to that bottle, not the default one.
+        if bottleID == nil, let owner = BottleList(bottles: bottles).owner(of: url) {
+            bottleID = owner.bottle.id
+            engine = owner.engine
+        }
         var game = Game(name: GameNaming.displayName(for: url), executablePath: url.path,
                         bottleID: bottleID ?? sharedBottle().id)
         game.inspect(chooseRenderer: true)
@@ -847,6 +853,16 @@ final class AppModel {
 
     func showInFinder(_ game: Game) {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: game.executablePath)])
+    }
+
+    /// Opens the folder the game's program is in, where its saves, configs and mods usually live.
+    func openGameFolder(_ game: Game) {
+        let folder = URL(fileURLWithPath: game.executablePath).deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: folder.path) else {
+            errorMessage = "“\(game.name)”'s folder is gone: \(folder.path)"
+            return
+        }
+        NSWorkspace.shared.open(folder)
     }
 
     // MARK: Artwork

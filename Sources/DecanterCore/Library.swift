@@ -230,6 +230,20 @@ public struct BottleList: Codable, Equatable {
         self.bottles = bottles
         self.defaultID = defaultID
     }
+
+    /// The bottle and engine whose prefix holds `file`, for a program picked from inside a bottle:
+    /// it has to run there, since its install's registry entries exist in no other prefix.
+    public func owner(of file: URL) -> (bottle: Bottle, engine: Engine)? {
+        let path = file.standardizedFileURL.resolvingSymlinksInPath().path
+        for bottle in bottles {
+            for engine in bottle.engines {
+                guard let prefix = bottle.prefix(for: engine)?.standardizedFileURL.resolvingSymlinksInPath().path
+                else { continue }
+                if path.hasPrefix(prefix + "/") { return (bottle, engine) }
+            }
+        }
+        return nil
+    }
 }
 
 public enum BottleStore {

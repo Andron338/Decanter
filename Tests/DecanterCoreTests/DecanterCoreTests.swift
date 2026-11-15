@@ -999,4 +999,18 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertTrue(decoded.isHidden)
         XCTAssertEqual(decoded.categoryNames, ["Finished"])
     }
+
+    func testProgramInsideABottlePrefixBelongsToThatBottle() {
+        let crossoverPrefix = UUID(), winePrefix = UUID()
+        let game = Bottle(name: "Game", prefixes: [Engine.crossover.rawValue: crossoverPrefix,
+                                                   Engine.wine.rawValue: winePrefix])
+        let other = Bottle(name: "Other", prefixes: [Engine.crossover.rawValue: UUID()])
+        let list = BottleList(bottles: [other, game], defaultID: other.id)
+        let exe = BottleStore.prefix(crossoverPrefix)
+            .appendingPathComponent("drive_c/Program Files (x86)/Game/Game.exe")
+        let owner = list.owner(of: exe)
+        XCTAssertEqual(owner?.bottle.id, game.id)
+        XCTAssertEqual(owner?.engine, .crossover)
+        XCTAssertNil(list.owner(of: URL(fileURLWithPath: "/Users/me/Downloads/Game/autorun.exe")))
+    }
 }
