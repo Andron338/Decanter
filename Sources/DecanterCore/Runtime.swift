@@ -62,7 +62,8 @@ public enum Wine10Graphics: String, Codable, CaseIterable, Identifiable, Sendabl
     }
 }
 
-/// D3DMetal only works inside Apple's own (older) Wine, so it is a separate engine with separate bottles.
+/// D3DMetal ships with Apple's own (older) Wine, a separate engine with separate prefixes. The Wine 10
+/// engine can load the same D3DMetal files too (see `Wine10Graphics.d3dmetal`).
 public enum Engine: String, Sendable, CaseIterable {
     case wine
     case gptk

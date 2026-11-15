@@ -351,7 +351,7 @@ struct GameSettingsSheet: View {
                 + "Wine's own renderer for every DirectX version." + steam
         case .metal, .automatic:
             return automatic + "DirectX 10/11 through DXMT; DirectX 9 uses Wine's own renderer. "
-                + "DirectX 12 needs the vkd3d choice: the two can't share a game." + steam
+                + "DirectX 12 needs the D3DMetal choice: the two can't share a game." + steam
         }
     }
 
@@ -362,7 +362,7 @@ struct GameSettingsSheet: View {
         let wine10 = Launcher.wine10Graphics(for: game)
         switch game.settings.renderer {
         case .sikarugir where wine10 == .metal && top == 12 && !requirements.directX.contains(11) && !requirements.directX.contains(10):
-            return "This game uses DirectX 12, which DXMT can't translate. Choose vkd3d."
+            return "This game uses DirectX 12, which DXMT can't translate. Choose D3DMetal."
         case .sikarugir where wine10 == .vkd3d && !requirements.directX.contains(12) && hasModern:
             return "This game uses DirectX 10/11, which runs best through DXMT. Choose DXMT."
         case .metal where top == 12 && !requirements.directX.contains(11) && !requirements.directX.contains(10):
