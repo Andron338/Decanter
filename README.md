@@ -3,10 +3,12 @@
 A free, open-source way to run Windows games on Apple Silicon Macs. A native SwiftUI app with
 no setup questions: click **Set Up** once, then drop a game's `.exe` (or its installer) on the window.
 
-> Status: early. Tested on an M5 Max, macOS 27.2 (12 Nov 2026): setup, the DXMT overlay, the D3DMetal
-> engine install, adding a game and launching it all work. One game is confirmed playable so far: a modded
-> 32-bit DirectX 9 title (GTA: San Andreas) on the CrossOver engine. The DXMT and D3DMetal render paths
-> are installed but not yet exercised by a real DirectX 11/12 game.
+> Status: early. Tested on an M5 Max, macOS 27.2 (15 Nov 2026): setup, the DXMT overlay, the D3DMetal
+> engine install, adding a game and launching it all work. Confirmed so far: a modded 32-bit DirectX 9
+> title (GTA: San Andreas) is playable on the CrossOver engine, a DirectX 11 game (Rise of Nations:
+> Extended Edition) reaches its menu through Steam on DXMT, and a DirectX 12-only game (S.T.A.L.K.E.R. 2)
+> starts through Steam on D3DMetal. D3DMetal on Apple's own Wine, outside Steam, has not been exercised
+> by a real game yet.
 
 ## How it works
 
@@ -27,8 +29,11 @@ servers) and runs it the same way, offering a bottle named Steam on the one engi
 on: Sikarugir's Wine 10 (about 160 MB, fetched the first time). Stock Wine 11 can't draw Steam's window and
 CrossOver's Wine 9 can't complete Steam's internal connection on current macOS; Wine 10 with CrossOver's
 fixes does both. Games started from Steam run on Steam's engine, which covers every DirectX version (see
-*One engine for DirectX 9 to 12* below). Confirmed so far: signing in, downloading, and a DirectX 11 game
-(Rise of Nations: Extended Edition) reaching its menu.
+*One engine for DirectX 9 to 12* below). Confirmed so far: signing in, downloading, a DirectX 11 game
+(Rise of Nations: Extended Edition) reaching its menu, and a DirectX 12-only game (S.T.A.L.K.E.R. 2)
+starting on D3DMetal. Before a Steam game starts, Decanter installs Microsoft's Visual C++ 2015-2022
+runtime into its prefix if it is missing, because Unreal's launcher checks for it and refuses Wine's own
+copies.
 
 **Steam games.** Decanter reads the Steam client's own files in each bottle (`steamapps/appmanifest_*.acf`,
 in every library folder) and, when Steam has finished downloading a game the library lacks, offers it in a
@@ -83,17 +88,22 @@ Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete 
 - **One engine for DirectX 9 to 12.** The Wine 10 engine is CrossOver-based, and its loader searches one
   folder per graphics backend (`WINEDLLPATH_DXMT`, `WINEDLLPATH_D9VK`, …) *before* its own DLLs, picked by
   environment variable for each process. So nothing is copied into the engine: per game, Direct3D 10/11
-  goes to DXMT, or Direct3D 12 to Wine's own vkd3d on MoltenVK, and Direct3D 9 stays on Wine's own
-  renderer. The engine finds the main Wine's Vulkan loader, which hides MoltenVK from it, so Decanter
-  links MoltenVK in the loader's place, as CrossOver does. One limit: vkd3d needs Wine's own DXGI and
-  DXMT replaces it, so a game gets either DXMT's 10/11 or Direct3D 12. *Automatic* picks DXMT for
-  Direct3D 10/11, Direct3D 12 for games using nothing newer, and Wine's own renderer for Direct3D 9 and
-  older, which keeps DXMT's DXGI away from Steam's overlay in old games (GTA: Vice City hangs with it). Steam's games inherit Steam's environment, so when a
+  goes to DXMT, Direct3D 12 to Apple's D3DMetal (`WINEDLLPATH_D3DMETAL`, from the Game Porting Toolkit
+  download) or to Wine's own vkd3d on MoltenVK, and Direct3D 9 stays on Wine's own renderer. The engine
+  finds the main Wine's Vulkan loader, which hides MoltenVK from it, so Decanter links MoltenVK in the
+  loader's place, as CrossOver does. One limit: Direct3D 12 needs a DXGI other than DXMT's, so a game
+  gets either DXMT's 10/11 or Direct3D 12. *Automatic* picks D3DMetal for games that require Direct3D 12
+  (they ship the D3D12 Agility SDK), DXMT for Direct3D 10/11, vkd3d for other games that use Direct3D 12
+  alone, and Wine's own renderer for Direct3D 9 and older, which keeps DXMT's DXGI away from Steam's
+  overlay in old games (GTA: Vice City hangs with it). vkd3d also stands in for D3DMetal until that is
+  installed, but it is the weaker route: it could not create a device for S.T.A.L.K.E.R. 2 ("Metal does
+  not support buffer robustness"), and no game has been confirmed on it. Steam's games inherit Steam's environment, so when a
   library game needs the other choice and Steam is running, Decanter asks Steam to quit and starts it again.
   Tried and left out (Nov 2026): DXVK for Direct3D 9 (Gcenx's 2023 macOS build can't create a device on
   current MoltenVK; Sikarugir's 2025 d9vk draws GTA: San Andreas wrongly even on CrossOver's patched
   MoltenVK), DXVK 3.x and vkd3d-proton on Mesa's KosmicKrisp Metal driver (refused for missing wireframe
-  fill and transform feedback), and Apple's D3DMetal in this engine (crashes: built for Apple's older Wine).
+  fill and transform feedback), and moving Steam to Apple's own Wine for D3DMetal (the Steam client
+  crashes there at startup).
 - **Detection without running anything.** Decanter parses the PE import and delay-import tables of the
   `.exe` and the DLLs beside it (engines such as Unity keep the renderer in a DLL). Packed or
   copy-protected executables hide their imports, so it falls back to DLL names found as text in the file
@@ -112,10 +122,11 @@ Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete 
 - **Nothing proprietary is bundled.** Wine and DXMT are both LGPL-2.1 and are downloaded from their
   upstream releases.
 - **D3DMetal is an opt-in second engine.** Apple's D3DMetal (from the Game Porting Toolkit) is proprietary
-  and only works inside Apple's own, older Wine. Choosing it in a game's settings offers a separate
+  and ships with Apple's own, older Wine. Choosing it in a game's settings offers a separate
   ~230 MB download of the [community binary build](https://github.com/Gcenx/game-porting-toolkit) after
   you accept Apple's licence. Because that Wine can't share a prefix with Wine 11, a bottle gets a second
-  prefix for D3DMetal the first time it's used; saves don't carry over between the two.
+  prefix for D3DMetal the first time it's used; saves don't carry over between the two. Steam games are
+  the exception: the Wine 10 engine loads the same D3DMetal files itself, so they stay in Steam's prefix.
 
 ## What is and isn't covered
 
@@ -124,7 +135,7 @@ Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete 
 | Direct3D 10 / 11 | DXMT → Metal | Default. |
 | Direct3D 11 / 12 | D3DMetal → Metal | Opt-in download (Apple licence). The way to run DirectX 12 games. Optional ray tracing, DLSS-through-MetalFX and AVX switches. |
 | Direct3D 9 and older, 32-bit games | CrossOver engine (Wine 9, wined3d) | Chosen automatically; downloaded on first play. Some games also need the fixed-size window option. |
-| Direct3D 9 / 10 / 11 / 12 | Wine 10 engine: wined3d, DXMT, vkd3d → Metal | The Steam engine. DXMT by default; vkd3d for Direct3D 12. A Direct3D 12 device is created, but no DirectX 12 game has been tried yet. |
+| Direct3D 9 / 10 / 11 / 12 | Wine 10 engine: wined3d, DXMT, D3DMetal or vkd3d → Metal | The Steam engine. DXMT by default; D3DMetal for games that require Direct3D 12 (S.T.A.L.K.E.R. 2 starts this way), with vkd3d as the fallback until D3DMetal is installed. |
 | Anti-cheat (EAC, BattlEye, Vanguard) | — | Does not work under Wine on macOS, in any app. |
 
 Wine for macOS is an x86-64 build and runs through Rosetta 2, so Rosetta must be installed.
