@@ -190,17 +190,135 @@ final class DecanterCoreTests: XCTestCase {
         runtime.sikarugirPath = "/rt/sk"
         XCTAssertEqual(runtime.engine(for: .sikarugir), .sikarugir)
         XCTAssertEqual(runtime.wine(for: .sikarugir).path, "/rt/sk/bin/wine")
-        // The archive has no support libraries of its own; the main Wine's are borrowed.
-        XCTAssertEqual(runtime.libraryFallback(for: .sikarugir), "/rt/sk/lib:/rt/wine/lib:/usr/local/lib:/usr/lib")
+        // The archive has no support libraries of its own; the main Wine's are borrowed, after
+        // MoltenVK standing in for the Vulkan loader.
+        XCTAssertEqual(runtime.libraryFallback(for: .sikarugir),
+                       RuntimeManager.moltenVKFolder.path + ":/rt/sk/lib:/rt/wine/lib:/usr/local/lib:/usr/lib")
         XCTAssertNil(runtime.libraryFallback(for: .wine))
         XCTAssertEqual(GameInstaller.renderer(for: SteamInstaller.engine), .sikarugir)
-        // An engine installed before it got DXMT is topped up, but only when DXMT itself is installed.
-        XCTAssertFalse(runtime.sikarugirLacksDXMT)
-        runtime.dxmtTag = "v0.80"
-        XCTAssertTrue(runtime.sikarugirLacksDXMT)
+        // An engine still on the copy with DXMT inside it is moved to the engine as downloaded.
+        XCTAssertFalse(runtime.sikarugirNeedsUpdate)
         runtime.sikarugirPath = "/rt/sk-10.0_8+dxmt-v0.80/wswine.bundle"
-        XCTAssertFalse(runtime.sikarugirLacksDXMT)
+        XCTAssertTrue(runtime.sikarugirNeedsUpdate)
         XCTAssertEqual(BottleStore.templatePrefix(.sikarugir).lastPathComponent, "sk-prefix")
+    }
+
+    func testWine10RoutesEachDirectXVersion() throws {
+        let home = try temporaryFolder()
+        let saved = Paths.root
+        Paths.root = home
+        defer { Paths.root = saved }
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Components/dxmt-v0.80/v0.80/x86_64-windows"),
+                                                withIntermediateDirectories: true)
+        var runtime = InstalledRuntime(wineTag: "11.0", dxmtTag: "v0.80", basePath: "/rt/wine")
+        runtime.sikarugirPath = "/rt/sk"
+        let dxmt = home.appendingPathComponent("Components/dxmt-v0.80/v0.80").path
+
+        var game = Game(name: "X", executablePath: "/Games/X/x.exe", bottleID: UUID())
+        game.settings.renderer = .sikarugir
+        var env = Launcher.plan(game: game, prefix: prefix, runtime: runtime).environment
+        // Direct3D 9 stays on Wine's own renderer.
+        XCTAssertNil(env["WINEDLLPATH_D9VK"])
+        // The enumerator that finds DXMT's folders may report /var as /private/var.
+        XCTAssertEqual(env["WINEDLLPATH_DXMT"].map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
+                       URL(fileURLWithPath: dxmt).resolvingSymlinksInPath().path)
+
+        // Detected as Direct3D 12 only: Wine's DXGI has to win, so DXMT stays out.
+        game.requirements = GameRequirements(is64Bit: true, directX: [12], usesOpenGL: false, usesVulkan: false,
+                                             runtimes: [], guessedFromStrings: false)
+        XCTAssertEqual(Launcher.wine10Graphics(for: game), .vkd3d)
+        env = Launcher.plan(game: game, prefix: prefix, runtime: runtime).environment
+        XCTAssertNil(env["WINEDLLPATH_DXMT"])
+        // A game that also has a Direct3D 11 path keeps DXMT.
+        game.requirements?.directX = [11, 12]
+        XCTAssertEqual(Launcher.wine10Graphics(for: game), .metal)
+        // DirectX 9 and older stay on Wine's own renderer, without DXMT's DXGI.
+        game.requirements?.directX = [7, 8]
+        XCTAssertEqual(Launcher.wine10Graphics(for: game), .wine)
+        XCTAssertNil(Launcher.plan(game: game, prefix: prefix, runtime: runtime).environment["WINEDLLPATH_DXMT"])
+
+        game.settings.wine10Graphics = .wine
+        env = Launcher.plan(game: game, prefix: prefix, runtime: runtime).environment
+        XCTAssertNil(env["WINEDLLPATH_DXMT"])
+
+        // Other engines never get the variables.
+        game.settings.renderer = .metal
+        game.settings.wine10Graphics = .metal
+        env = Launcher.plan(game: game, prefix: prefix, runtime: runtime).environment
+        XCTAssertNil(env["WINEDLLPATH_DXMT"])
+    }
+
+    func testModLoadersAreFoundAndOnlyUsedWithMods() throws {
+        let folder = try temporaryFolder()
+        let program = folder.appendingPathComponent("gta-vc.exe")
+        let fm = FileManager.default
+        for file in ["gta-vc.exe", "D3D8.dll", "vorbisFile.dll", "mss32.dll"] {
+            fm.createFile(atPath: folder.appendingPathComponent(file).path, contents: Data())
+        }
+        // Only DLLs Wine has its own copy of matter; the case of the file name doesn't.
+        XCTAssertEqual(ModLoaders.proxyDLLs(besides: program), ["d3d8"])
+        XCTAssertFalse(ModLoaders.hasASIMods(besides: program))
+        XCTAssertEqual(ModLoaders.wanted(.automatic, program: program), [])
+        XCTAssertEqual(ModLoaders.wanted(.on, program: program), ["d3d8"])
+
+        try fm.createDirectory(at: folder.appendingPathComponent("scripts"), withIntermediateDirectories: true)
+        fm.createFile(atPath: folder.appendingPathComponent("scripts/SilentPatchVC.ASI").path, contents: Data())
+        XCTAssertTrue(ModLoaders.hasASIMods(besides: program))
+        XCTAssertEqual(ModLoaders.wanted(.automatic, program: program), ["d3d8"])
+        XCTAssertEqual(ModLoaders.wanted(.off, program: program), [])
+
+        XCTAssertEqual(ModLoaders.steamAppID(in: "-silent -applaunch 12110 -foo"), 12110)
+        XCTAssertNil(ModLoaders.steamAppID(in: "-applaunch"))
+        // Settings saved before the option existed decode to Automatic.
+        XCTAssertEqual(try JSONDecoder().decode(GameSettings.self, from: Data("{}".utf8)).modLoaders, .automatic)
+    }
+
+    func testProgramsInTheBottleGoByTheirCDrivePath() {
+        let prefix = URL(fileURLWithPath: "/b/x/prefix")
+        var game = Game(name: "Steam", executablePath: "/b/x/prefix/drive_c/Program Files (x86)/Steam/steam.exe", bottleID: UUID())
+        game.settings.arguments = "-applaunch 12110"
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments,
+                       [#"C:\Program Files (x86)\Steam\steam.exe"#, "-applaunch", "12110"])
+        game.settings.virtualDesktop = true
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments[2],
+                       #"C:\Program Files (x86)\Steam\steam.exe"#)
+        // Elsewhere on the Mac: a Mac path, or Z: where Wine needs a Windows one.
+        game.executablePath = "/Games/X/x.exe"
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments[2], #"Z:\Games\X\x.exe"#)
+        game.settings.virtualDesktop = false
+        XCTAssertEqual(Launcher.plan(game: game, prefix: prefix, runtime: runtime).arguments.first, "/Games/X/x.exe")
+        // Another bottle's drive isn't this prefix's C:.
+        XCTAssertNil(Launcher.cDrivePath(URL(fileURLWithPath: "/b/y/prefix/drive_c/a.exe"), prefix: prefix))
+    }
+
+    func testSteamGamesGetTheFixedSizeWindowForTheWholeBottle() {
+        var game = Game(name: "Vice City", executablePath: "/b/Steam/steam.exe", bottleID: UUID())
+        game.settings.virtualDesktop = true
+        game.settings.virtualDesktopSize = "1280x720"
+        // Started by Decanter itself: `explorer /desktop=` is enough.
+        XCTAssertNil(Launcher.steamDesktop(for: game))
+        // Set up by hand as Steam with arguments, or added from Steam's library.
+        game.settings.arguments = "-applaunch 12110"
+        XCTAssertEqual(Launcher.steamDesktop(for: game), "1280x720")
+        game.settings.arguments = ""
+        XCTAssertNil(Launcher.steamDesktop(for: game))
+        game.steamAppID = 12110
+        XCTAssertEqual(Launcher.steamDesktop(for: game), "1280x720")
+        game.settings.virtualDesktopSize = Launcher.screenSizedDesktop
+        XCTAssertEqual(Launcher.steamDesktop(for: game, screen: (1512, 982)), "1512x982")
+        // Scaled fullscreen replaces the window, and without the option nothing is set.
+        game.settings.scaledFullscreen = true
+        XCTAssertNil(Launcher.steamDesktop(for: game))
+        game.settings.scaledFullscreen = false
+        game.settings.virtualDesktop = false
+        XCTAssertNil(Launcher.steamDesktop(for: game))
+    }
+
+    func testWine10RoutingRemembersWhatTheBottleRunsWith() throws {
+        let prefix = try temporaryFolder().appendingPathComponent("sk")
+        XCTAssertNil(Launcher.runningRouting(in: prefix))
+        Launcher.recordRouting(.vkd3d, in: prefix)
+        XCTAssertEqual(Launcher.runningRouting(in: prefix), .vkd3d)
     }
 
     func testMsiGoesThroughMsiexec() {
@@ -530,6 +648,21 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(apps[1].cachedCover?.lastPathComponent, "library_600x900.jpg")
         XCTAssertNil(apps[0].cachedCover)
         XCTAssertTrue(SteamLibrary.clients(in: try makePrefix(in: folder, named: "plain", files: ["Games/x.exe"])).isEmpty)
+    }
+
+    func testLaunchesAddToTheLogInsteadOfReplacingIt() throws {
+        let log = try temporaryFolder().appendingPathComponent("game.log")
+        // Two launches with the log open at once, as when Steam is already running for the second.
+        let first = try Launcher.appendingHandle(for: log)
+        first.write(Data("first\n".utf8))
+        let second = try Launcher.appendingHandle(for: log)
+        second.write(Data("second\n".utf8))
+        first.write(Data("first again\n".utf8))
+        XCTAssertEqual(try String(contentsOf: log, encoding: .utf8), "first\nsecond\nfirst again\n")
+
+        try Data(count: Launcher.logLimit + 1).write(to: log)
+        try Launcher.appendingHandle(for: log).write(Data("fresh\n".utf8))
+        XCTAssertEqual(try String(contentsOf: log, encoding: .utf8), "fresh\n")
     }
 
     func testVDFParsing() {

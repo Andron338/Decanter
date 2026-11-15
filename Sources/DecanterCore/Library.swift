@@ -19,6 +19,10 @@ public struct GameSettings: Codable, Equatable {
     public var rayTracing = false
     public var metalFX = false
     public var advertiseAVX = false
+    /// Wine 10 only: which translator each DirectX version gets.
+    public var wine10Graphics = Wine10Graphics.automatic
+    /// Whether Wine uses a mod loader in the game folder instead of its own DLL (see `ModLoaders`).
+    public var modLoaders = ModLoaderMode.automatic
     /// Wine DLL overrides, in WINEDLLOVERRIDES form: `dinput8=n,b;d3d9=n`.
     public var dllOverrides = ""
     /// Extra environment variables, one `NAME=value` per line.
@@ -46,6 +50,8 @@ public struct GameSettings: Codable, Equatable {
         rayTracing = try c.decodeIfPresent(Bool.self, forKey: .rayTracing) ?? d.rayTracing
         metalFX = try c.decodeIfPresent(Bool.self, forKey: .metalFX) ?? d.metalFX
         advertiseAVX = try c.decodeIfPresent(Bool.self, forKey: .advertiseAVX) ?? d.advertiseAVX
+        wine10Graphics = (try? c.decodeIfPresent(Wine10Graphics.self, forKey: .wine10Graphics)) ?? d.wine10Graphics
+        modLoaders = (try? c.decodeIfPresent(ModLoaderMode.self, forKey: .modLoaders)) ?? d.modLoaders
         dllOverrides = try c.decodeIfPresent(String.self, forKey: .dllOverrides) ?? d.dllOverrides
         environment = try c.decodeIfPresent(String.self, forKey: .environment) ?? d.environment
         workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory) ?? d.workingDirectory

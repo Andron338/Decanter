@@ -626,7 +626,7 @@ final class AppModel {
             }
             self.runtime = runtime
         }
-        if renderer == .sikarugir && (!runtime.hasSikarugir || runtime.sikarugirLacksDXMT) {
+        if renderer == .sikarugir && (!runtime.hasSikarugir || runtime.sikarugirNeedsUpdate) {
             let previous = busyMessage
             busyMessage = runtime.hasSikarugir ? "Updating the engine for Steam…" : "Getting the engine for Steam (about 160 MB, one time)…"
             defer { busyMessage = previous }
@@ -665,6 +665,7 @@ final class AppModel {
                     games[index].lastPlayed = Date()
                     LibraryStore.save(games)
                 }
+                await matchSteamRouting(for: game, prefix: prefix, runtime: runtime)
                 await Launcher.applyRegistrySettings(game: game, prefix: prefix, runtime: runtime)
                 // Fill the screen: the Mac drops to the resolution that best fits the window, and the
                 // Windows desktop takes that size, leaving the game's own resolution to size the window.
@@ -681,6 +682,8 @@ final class AppModel {
                     filled = true
                     fillingScreen.insert(id)
                 }
+                await Launcher.applySteamDesktop(game: launched, prefix: prefix, runtime: runtime)
+                await ModLoaders.apply(game: launched, prefix: prefix, runtime: runtime)
                 let started = Date()
                 let restoreScreen = {
                     if scaled { ScaledFullscreen.end() }
@@ -711,6 +714,31 @@ final class AppModel {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// A game started through Steam runs with the environment Steam was started with, so its DirectX
+    /// routing is Steam's. When the game wants another one and Steam is already running, Steam is
+    /// asked to quit first and then starts again, with the game, on the game's routing.
+    private func matchSteamRouting(for game: Game, prefix: URL, runtime: InstalledRuntime) async {
+        guard runtime.engine(for: game.settings.renderer) == .sikarugir, Self.startsSteam(game) else { return }
+        let wanted = Launcher.wine10Graphics(for: game)
+        let steamRunning = games.contains {
+            $0.id != game.id && running.contains($0.id) && $0.bottleID == game.bottleID && Self.startsSteam($0)
+                && runtime.engine(for: $0.settings.renderer) == .sikarugir
+        }
+        if steamRunning, let current = Launcher.runningRouting(in: prefix), current != wanted {
+            let previous = busyMessage
+            busyMessage = "Restarting Steam for \(game.name)'s DirectX setting…"
+            defer { busyMessage = previous }
+            await Launcher.shutDownSteam(URL(fileURLWithPath: game.executablePath), prefix: prefix, runtime: runtime)
+        } else if steamRunning {
+            return
+        }
+        Launcher.recordRouting(wanted, in: prefix)
+    }
+
+    private static func startsSteam(_ game: Game) -> Bool {
+        game.steamAppID != nil || URL(fileURLWithPath: game.executablePath).lastPathComponent.lowercased() == "steam.exe"
     }
 
     /// Wine can only end a whole prefix at once, so this also ends anything else running in the

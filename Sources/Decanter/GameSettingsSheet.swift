@@ -219,8 +219,19 @@ struct GameSettingsSheet: View {
                     Text("Metal — DXMT (DirectX 10/11)").tag(Renderer.metal)
                     Text("D3DMetal — Apple (DirectX 11/12)").tag(Renderer.d3dmetal)
                     Text("CrossOver engine (DirectX 9 and older, 32-bit)").tag(Renderer.crossover)
-                    Text("Wine 10 (Steam)").tag(Renderer.sikarugir)
+                    Text("Wine 10 — DirectX 9 to 12 (Steam)").tag(Renderer.sikarugir)
                     Text("Wine 11 built-in").tag(Renderer.wine)
+                }
+                if game.settings.renderer == .sikarugir {
+                    Picker(selection: $game.settings.wine10Graphics) {
+                        Text("Automatic").tag(Wine10Graphics.automatic)
+                        Text("DXMT (DirectX 10, 11)").tag(Wine10Graphics.metal)
+                        Text("vkd3d (DirectX 12)").tag(Wine10Graphics.vkd3d)
+                        Text("Wine's own").tag(Wine10Graphics.wine)
+                    } label: {
+                        Text("DirectX")
+                        Text(wine10Explanation)
+                    }
                 }
                 if game.settings.renderer == .crossover {
                     Text(model.runtime?.hasCrossOver == true
@@ -281,11 +292,32 @@ struct GameSettingsSheet: View {
         .formStyle(.grouped)
     }
 
+    private var wine10Explanation: String {
+        let route = Launcher.wine10Graphics(for: game)
+        let automatic = game.settings.wine10Graphics == .automatic ? "Using \(route == .vkd3d ? "vkd3d" : "DXMT") for this game. " : ""
+        let steam = game.steamAppID != nil ? " If Steam is already running with the other choice, it restarts first." : ""
+        switch route {
+        case .vkd3d:
+            return automatic + "DirectX 12 through vkd3d on MoltenVK. DirectX 9, 10 and 11 use Wine's own renderer." + steam
+        case .wine:
+            return (game.settings.wine10Graphics == .automatic ? "Using Wine's own for this older game. " : "")
+                + "Wine's own renderer for every DirectX version." + steam
+        case .metal, .automatic:
+            return automatic + "DirectX 10/11 through DXMT; DirectX 9 uses Wine's own renderer. "
+                + "DirectX 12 needs the vkd3d choice: the two can't share a game." + steam
+        }
+    }
+
     /// A warning when the chosen renderer can't handle what the game was detected to use.
     private func rendererAdvice(_ requirements: GameRequirements) -> String? {
         guard let top = requirements.directX.last else { return nil }
         let hasModern = requirements.directX.contains { $0 >= 10 }
+        let wine10 = Launcher.wine10Graphics(for: game)
         switch game.settings.renderer {
+        case .sikarugir where wine10 == .metal && top == 12 && !requirements.directX.contains(11) && !requirements.directX.contains(10):
+            return "This game uses DirectX 12, which DXMT can't translate. Choose vkd3d."
+        case .sikarugir where wine10 == .vkd3d && !requirements.directX.contains(12) && hasModern:
+            return "This game uses DirectX 10/11, which runs best through DXMT. Choose DXMT."
         case .metal where top == 12 && !requirements.directX.contains(11) && !requirements.directX.contains(10):
             return "This game uses DirectX 12, which DXMT can't translate. Choose D3DMetal."
         case .metal where !hasModern, .d3dmetal where !hasModern:
@@ -299,12 +331,36 @@ struct GameSettingsSheet: View {
 
     // MARK: System
 
+    /// What the mod-loader setting will do, from the files next to the game's program. A hand-made
+    /// Steam entry's program is only known once Steam's library is read at launch.
+    private var modLoaderExplanation: String {
+        let base = "Uses a mod loader in the game's folder (such as Ultimate ASI Loader posing as d3d8.dll) "
+            + "instead of Wine's own DLL, so .asi mods load, including in games Steam starts."
+        let program = Launcher.startsThroughSteam(game)
+            ? game.iconPath.map { URL(fileURLWithPath: $0) }
+            : URL(fileURLWithPath: game.executablePath)
+        guard let program else { return base + " The game's folder is checked when it starts." }
+        let dlls = ModLoaders.proxyDLLs(besides: program).map { $0 + ".dll" }
+        let found = dlls.isEmpty ? "No loader DLL found next to \(program.lastPathComponent)."
+            : "Found \(dlls.joined(separator: ", "))" + (ModLoaders.hasASIMods(besides: program) ? " and .asi mods." : ", but no .asi mods.")
+        let effect = ModLoaders.wanted(game.settings.modLoaders, program: program).isEmpty ? " Wine uses its own." : " Wine will use the game's."
+        return base + " " + found + effect
+    }
+
     private var systemTab: some View {
         Form {
             Section("Wine") {
                 Toggle(isOn: $game.settings.fastSync) {
                     Text("Fast synchronisation")
                     Text("MSync. Faster for most games; turn it off if one hangs or stutters.")
+                }
+                Picker(selection: $game.settings.modLoaders) {
+                    Text("Automatic").tag(ModLoaderMode.automatic)
+                    Text("On").tag(ModLoaderMode.on)
+                    Text("Off").tag(ModLoaderMode.off)
+                } label: {
+                    Text("Mod loaders")
+                    Text(modLoaderExplanation)
                 }
                 TextField("DLL overrides", text: $game.settings.dllOverrides, prompt: Text("e.g. dinput8=n,b;d3d9=n"))
                 Text("Makes Wine prefer a DLL shipped with the game or a mod (n) over its own (b). Many mod loaders need this.")

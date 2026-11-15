@@ -26,9 +26,9 @@ Right-click a game → **Run Patch or Installer…** runs a patch, DLC or missin
 servers) and runs it the same way, offering a bottle named Steam on the one engine the Steam client runs
 on: Sikarugir's Wine 10 (about 160 MB, fetched the first time). Stock Wine 11 can't draw Steam's window and
 CrossOver's Wine 9 can't complete Steam's internal connection on current macOS; Wine 10 with CrossOver's
-fixes does both. Games started from Steam run on Steam's engine, so it gets the same DXMT overlay as the
-main Wine for DirectX 10/11. Confirmed so far: signing in, downloading, and a DirectX 11 game (Rise of
-Nations: Extended Edition) reaching its menu.
+fixes does both. Games started from Steam run on Steam's engine, which covers every DirectX version (see
+*One engine for DirectX 9 to 12* below). Confirmed so far: signing in, downloading, and a DirectX 11 game
+(Rise of Nations: Extended Edition) reaching its menu.
 
 **Steam games.** Decanter reads the Steam client's own files in each bottle (`steamapps/appmanifest_*.acf`,
 in every library folder) and, when Steam has finished downloading a game the library lacks, offers it in a
@@ -56,7 +56,9 @@ Per-game settings live behind **Configure…**, in four tabs. *Game Info*: name,
 time and what was detected. *Game Options*: the program, launch arguments and working folder. *Graphics*:
 the renderer (DXMT, Apple's D3DMetal, the CrossOver engine, or Wine 11's built-in), a fixed-size window
 (fixes old games that crash on fullscreen mode switches), Retina rendering and the Metal HUD. *System*:
-MSync, DLL overrides (for mod loaders), environment variables, and Wine's own configuration and registry
+MSync, mod loaders (Wine uses a loader such as Ultimate ASI Loader from the game folder instead of its
+own DLL, set per program in the bottle's registry so it also works when Steam starts the game; automatic when
+`.asi` mods are present), DLL overrides, environment variables, and Wine's own configuration and registry
 editor.
 
 **Scaled fullscreen.** A Mac's screen only offers its own resolutions, so a game that asks for 800x600 or
@@ -66,7 +68,9 @@ the real screen mirror it: the game goes fullscreen as it would on a PC, and mac
 the whole screen, with black bars where the shape differs. The Mac's screen is back to normal when the game
 quits (or if Decanter does). Everything looks softer meanwhile, because the virtual screen isn't Retina.
 Virtual screens come from an undocumented part of macOS, the one display utilities use. Confirmed so far
-with Need for Speed Carbon on the CrossOver engine.
+with Need for Speed Carbon on the CrossOver engine. The refusals don't depend on the engine: Wine 11,
+CrossOver's Wine 9, Wine 10 and Apple's Wine all list exactly the modes macOS offers and all turn down
+640x480, 800x600, 1024x768 and 1280x720 on a MacBook screen.
 
 Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete that folder to uninstall.
 
@@ -76,6 +80,20 @@ Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete 
   (`set_dll_path` in `dlls/ntdll/unix/loader.c`), so DXMT's builtin DLLs can't be injected by environment
   variable; they have to replace Wine's `d3d11`/`dxgi`/`d3d10core`. Decanter does that on an APFS clone of
   the runtime, so the pristine Wine stays available as a per-game fallback at almost no disk cost.
+- **One engine for DirectX 9 to 12.** The Wine 10 engine is CrossOver-based, and its loader searches one
+  folder per graphics backend (`WINEDLLPATH_DXMT`, `WINEDLLPATH_D9VK`, …) *before* its own DLLs, picked by
+  environment variable for each process. So nothing is copied into the engine: per game, Direct3D 10/11
+  goes to DXMT, or Direct3D 12 to Wine's own vkd3d on MoltenVK, and Direct3D 9 stays on Wine's own
+  renderer. The engine finds the main Wine's Vulkan loader, which hides MoltenVK from it, so Decanter
+  links MoltenVK in the loader's place, as CrossOver does. One limit: vkd3d needs Wine's own DXGI and
+  DXMT replaces it, so a game gets either DXMT's 10/11 or Direct3D 12. *Automatic* picks DXMT for
+  Direct3D 10/11, Direct3D 12 for games using nothing newer, and Wine's own renderer for Direct3D 9 and
+  older, which keeps DXMT's DXGI away from Steam's overlay in old games (GTA: Vice City hangs with it). Steam's games inherit Steam's environment, so when a
+  library game needs the other choice and Steam is running, Decanter asks Steam to quit and starts it again.
+  Tried and left out (Nov 2026): DXVK for Direct3D 9 (Gcenx's 2023 macOS build can't create a device on
+  current MoltenVK; Sikarugir's 2025 d9vk draws GTA: San Andreas wrongly even on CrossOver's patched
+  MoltenVK), DXVK 3.x and vkd3d-proton on Mesa's KosmicKrisp Metal driver (refused for missing wireframe
+  fill and transform feedback), and Apple's D3DMetal in this engine (crashes: built for Apple's older Wine).
 - **Detection without running anything.** Decanter parses the PE import and delay-import tables of the
   `.exe` and the DLLs beside it (engines such as Unity keep the renderer in a DLL). Packed or
   copy-protected executables hide their imports, so it falls back to DLL names found as text in the file
@@ -106,6 +124,7 @@ Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete 
 | Direct3D 10 / 11 | DXMT → Metal | Default. |
 | Direct3D 11 / 12 | D3DMetal → Metal | Opt-in download (Apple licence). The way to run DirectX 12 games. Optional ray tracing, DLSS-through-MetalFX and AVX switches. |
 | Direct3D 9 and older, 32-bit games | CrossOver engine (Wine 9, wined3d) | Chosen automatically; downloaded on first play. Some games also need the fixed-size window option. |
+| Direct3D 9 / 10 / 11 / 12 | Wine 10 engine: wined3d, DXMT, vkd3d → Metal | The Steam engine. DXMT by default; vkd3d for Direct3D 12. A Direct3D 12 device is created, but no DirectX 12 game has been tried yet. |
 | Anti-cheat (EAC, BattlEye, Vanguard) | — | Does not work under Wine on macOS, in any app. |
 
 Wine for macOS is an x86-64 build and runs through Rosetta 2, so Rosetta must be installed.
@@ -132,9 +151,9 @@ Requires Xcode 15+ (Swift 5.9+) and macOS 14+. `swift test` runs the core tests.
 
 ## Roadmap
 
+- DXVK for Direct3D 9 once MoltenVK or KosmicKrisp can run it
 - Real game icons extracted from the `.exe`
 - D3DMetal 4 (Game Porting Toolkit 4) once a non-beta build is available
-- DXVK option for Direct3D 9
 - Runtime updates from inside the app
 - One-click Steam / Epic / GOG launchers
 - A community compatibility database with per-game presets
