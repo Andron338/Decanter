@@ -3,9 +3,22 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum LibraryFilter: Hashable {
-    case all, recent, favorites, running
+    case all, recent, favorites, running, hidden
     case renderer(Renderer)
     case bottle(UUID)
+    case category(String)
+}
+
+/// The game selected in the frontmost library window, for the Game menu.
+struct SelectedGameKey: FocusedValueKey {
+    typealias Value = UUID
+}
+
+extension FocusedValues {
+    var selectedGameID: UUID? {
+        get { self[SelectedGameKey.self] }
+        set { self[SelectedGameKey.self] = newValue }
+    }
 }
 
 enum LibrarySort: String, CaseIterable, Identifiable {
@@ -38,6 +51,9 @@ struct LibraryView: View {
     @State private var filter: LibraryFilter? = .all
     @State private var selection: Game.ID?
     @State private var search = ""
+    /// Text of the New Category / Rename Category prompt.
+    @State private var categoryName = ""
+    @FocusState private var gridFocused: Bool
     @AppStorage("libraryLayout") private var layout = LibraryLayout.grid
     @AppStorage("librarySort") private var sort = LibrarySort.name
     @AppStorage("librarySortReversed") private var sortReversed = false
@@ -67,6 +83,37 @@ struct LibraryView: View {
         .sheet(item: $model.coverSearch) { CoverSearchSheet(game: $0) }
         .sheet(isPresented: $model.managingBottles) { BottlesSheet(initial: selectedBottleID) }
         .sheet(isPresented: $model.choosingSteamGames) { SteamGamesSheet() }
+        .focusedSceneValue(\.selectedGameID, selection)
+        .alert("New Category", isPresented: Binding(
+            get: { model.namingCategory != nil }, set: { if !$0 { model.namingCategory = nil } }
+        )) {
+            TextField("Name", text: $categoryName)
+            Button("Add") {
+                if let game = model.namingCategory { model.setCategory(categoryName, included: true, for: game) }
+                categoryName = ""
+            }
+            .disabled(GameCategories.clean(categoryName).isEmpty)
+            Button("Cancel", role: .cancel) { categoryName = "" }
+        } message: {
+            Text("\(model.namingCategory?.name ?? "The game") goes into the new category, which appears in the sidebar.")
+        }
+        .alert("Rename Category", isPresented: Binding(
+            get: { model.renamingCategory != nil }, set: { if !$0 { model.renamingCategory = nil } }
+        )) {
+            TextField("Name", text: $categoryName)
+            Button("Rename") {
+                if let old = model.renamingCategory {
+                    model.renameCategory(old, to: categoryName)
+                    if filter == .category(old) { filter = .category(GameCategories.clean(categoryName)) }
+                }
+                categoryName = ""
+            }
+            .disabled(GameCategories.clean(categoryName).isEmpty)
+            Button("Cancel", role: .cancel) { categoryName = "" }
+        }
+        .onChange(of: model.renamingCategory) { _, name in
+            if let name { categoryName = name }
+        }
         .confirmationDialog(
             "Remove \(model.pendingRemoval?.name ?? "this game")?",
             isPresented: Binding(get: { model.pendingRemoval != nil }, set: { if !$0 { model.pendingRemoval = nil } }),
@@ -109,6 +156,21 @@ struct LibraryView: View {
                 if !model.running.isEmpty {
                     sidebarRow(.running, "Running", "play.circle")
                 }
+                if model.games.contains(where: \.isHidden) {
+                    sidebarRow(.hidden, "Hidden", "eye.slash")
+                }
+            }
+            let categories = model.categories
+            if !categories.isEmpty {
+                Section("Categories") {
+                    ForEach(categories, id: \.self) { name in
+                        sidebarRow(.category(name), name, "tag")
+                            .contextMenu {
+                                Button("Rename…") { model.renamingCategory = name }
+                                Button("Delete Category") { model.deleteCategory(name) }
+                            }
+                    }
+                }
             }
             let renderers = Renderer.allCases.filter { renderer in
                 model.games.contains { $0.settings.renderer == renderer }
@@ -141,6 +203,14 @@ struct LibraryView: View {
         .onChange(of: model.bottles.map(\.id)) { _, ids in
             if let id = selectedBottleID, !ids.contains(id) { filter = .all }
         }
+        .onChange(of: model.categories) { _, names in
+            if case .category(let name) = filter, !names.contains(where: { GameCategories.same($0, name) }) {
+                filter = .all
+            }
+        }
+        .onChange(of: model.games.contains(where: \.isHidden)) { _, anyHidden in
+            if !anyHidden && filter == .hidden { filter = .all }
+        }
         .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 260)
     }
 
@@ -153,13 +223,17 @@ struct LibraryView: View {
     // MARK: Filtering and sorting
 
     private func games(in filter: LibraryFilter) -> [Game] {
+        // Hidden games stay out of every view except Hidden itself and Running.
+        let shown = model.games.filter { !$0.isHidden }
         switch filter {
-        case .all: return model.games
-        case .recent: return model.games.filter { $0.lastPlayed != nil }
-        case .favorites: return model.games.filter(\.isFavorite)
+        case .all: return shown
+        case .recent: return shown.filter { $0.lastPlayed != nil }
+        case .favorites: return shown.filter(\.isFavorite)
         case .running: return model.games.filter { model.running.contains($0.id) }
-        case .renderer(let renderer): return model.games.filter { $0.settings.renderer == renderer }
-        case .bottle(let id): return model.games.filter { $0.bottleID == id }
+        case .hidden: return model.games.filter(\.isHidden)
+        case .renderer(let renderer): return shown.filter { $0.settings.renderer == renderer }
+        case .bottle(let id): return shown.filter { $0.bottleID == id }
+        case .category(let name): return shown.filter { $0.isIn(category: name) }
         }
     }
 
@@ -241,22 +315,70 @@ struct LibraryView: View {
     }
 
     private func grid(_ games: [Game]) -> some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: coverSize, maximum: coverSize * 1.35), spacing: 20)],
-                      spacing: 22) {
-                ForEach(games) { game in
-                    GameCard(game: game, isSelected: selection == game.id)
-                        .simultaneousGesture(TapGesture(count: 2).onEnded { model.play(game) })
-                        .simultaneousGesture(TapGesture().onEnded { selection = game.id })
+        GeometryReader { geometry in
+            // How many covers fit across, matching the adaptive grid below: 22 pt padding each side,
+            // 20 pt between covers.
+            let columns = max(1, Int((geometry.size.width - 44 + 20) / (coverSize + 20)))
+            ScrollViewReader { scroller in
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: coverSize, maximum: coverSize * 1.35), spacing: 20)],
+                              spacing: 22) {
+                        ForEach(games) { game in
+                            GameCard(game: game, isSelected: selection == game.id)
+                                .id(game.id)
+                                .simultaneousGesture(TapGesture(count: 2).onEnded { model.play(game) })
+                                .simultaneousGesture(TapGesture().onEnded {
+                                    selection = game.id
+                                    gridFocused = true
+                                })
+                        }
+                    }
+                    .padding(22)
+                    .frame(maxWidth: .infinity, minHeight: 200, alignment: .topLeading)
+                    .background {
+                        // Clicking the empty space between covers clears the selection.
+                        Color.clear.contentShape(Rectangle()).onTapGesture {
+                            selection = nil
+                            gridFocused = true
+                        }
+                    }
+                }
+                .focusable()
+                .focused($gridFocused)
+                .focusEffectDisabled()
+                .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { press in
+                    move(press.key, in: games, columns: columns)
+                    if let selection { withAnimation(.easeOut(duration: 0.15)) { scroller.scrollTo(selection) } }
+                    return .handled
+                }
+                .onKeyPress(.return) {
+                    guard let game = selectedGame, !model.running.contains(game.id) else { return .ignored }
+                    model.play(game)
+                    return .handled
+                }
+                // The Delete key arrives as the delete command, not as a key press SwiftUI's `.delete` matches.
+                .onDeleteCommand {
+                    if let game = selectedGame { model.pendingRemoval = game }
                 }
             }
-            .padding(22)
-            .frame(maxWidth: .infinity, minHeight: 200, alignment: .topLeading)
-            .background {
-                // Clicking the empty space between covers clears the selection.
-                Color.clear.contentShape(Rectangle()).onTapGesture { selection = nil }
-            }
         }
+    }
+
+    /// Moves the selection like Finder's icon view: left and right step through the list, up and down
+    /// jump a row. With nothing selected, any arrow selects the first game.
+    private func move(_ key: KeyEquivalent, in games: [Game], columns: Int) {
+        guard let current = games.firstIndex(where: { $0.id == selection }) else {
+            selection = games.first?.id
+            return
+        }
+        let target: Int
+        switch key {
+        case .leftArrow: target = current - 1
+        case .rightArrow: target = current + 1
+        case .upArrow: target = current - columns
+        default: target = current + columns
+        }
+        selection = games[min(max(target, 0), games.count - 1)].id
     }
 
     private func table(_ games: [Game]) -> some View {
@@ -295,6 +417,9 @@ struct LibraryView: View {
         } primaryAction: { ids in
             if let game = model.games.first(where: { ids.contains($0.id) }) { model.play(game) }
         }
+        .onDeleteCommand {
+            if let game = selectedGame { model.pendingRemoval = game }
+        }
     }
 
     @ToolbarContentBuilder
@@ -324,7 +449,7 @@ struct LibraryView: View {
                 Button("Add Game…") { chooseFile(installer: false) }
                     .keyboardShortcut("o")
                 Button("Install from Installer…") { chooseFile(installer: true) }
-                    .keyboardShortcut("i")
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
                 Button("Install Steam…") { model.installSteam() }
                 Button("Find Steam Games") { model.findSteamGames(includingDismissed: true) }
                 Divider()

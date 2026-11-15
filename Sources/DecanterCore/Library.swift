@@ -85,6 +85,10 @@ public struct Game: Codable, Identifiable, Equatable {
     public var steamAppID: Int?
     /// The program whose icon stands for the game, when that isn't the one that starts it.
     public var iconPath: String?
+    /// Kept out of the library views; shown only under Hidden.
+    public var hidden: Bool?
+    /// The user's own groupings ("Finished", "Co-op"…), shown in the sidebar.
+    public var categories: [String]?
 
     public init(name: String, executablePath: String, bottleID: UUID) {
         self.name = name
@@ -95,6 +99,21 @@ public struct Game: Codable, Identifiable, Equatable {
 
     public var isFavorite: Bool { favorite ?? false }
     public var playTime: TimeInterval { playSeconds ?? 0 }
+    public var isHidden: Bool { hidden ?? false }
+    public var categoryNames: [String] { categories ?? [] }
+
+    public func isIn(category: String) -> Bool {
+        categoryNames.contains { GameCategories.same($0, category) }
+    }
+
+    /// Adds or removes the game from a category. Names are matched ignoring case and surrounding spaces.
+    public mutating func setCategory(_ name: String, included: Bool) {
+        let name = GameCategories.clean(name)
+        guard !name.isEmpty else { return }
+        var names = categoryNames.filter { !GameCategories.same($0, name) }
+        if included { names.append(name) }
+        categories = names.isEmpty ? nil : names
+    }
 
     /// The program that is the game: for a Steam game, the one in its folder rather than `steam.exe`.
     public var programPath: String { steamAppID != nil ? (iconPath ?? executablePath) : executablePath }
@@ -116,6 +135,40 @@ public struct Game: Codable, Identifiable, Equatable {
             settings.renderer = renderer
             keepSteamOnWine10()
         }
+    }
+}
+
+/// Categories have no list of their own: one exists while some game is in it.
+public enum GameCategories {
+    public static func clean(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public static func same(_ a: String, _ b: String) -> Bool {
+        clean(a).caseInsensitiveCompare(clean(b)) == .orderedSame
+    }
+
+    /// Every category in use, once each (the first spelling seen wins), in Finder order.
+    public static func all(in games: [Game]) -> [String] {
+        var names: [String] = []
+        for name in games.flatMap(\.categoryNames).map(clean) where !name.isEmpty {
+            if !names.contains(where: { same($0, name) }) { names.append(name) }
+        }
+        return names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    /// Renames a category in every game. Renaming onto an existing name merges the two.
+    public static func rename(_ old: String, to new: String, in games: inout [Game]) {
+        let new = clean(new)
+        guard !new.isEmpty else { return }
+        for index in games.indices where games[index].isIn(category: old) {
+            games[index].setCategory(old, included: false)
+            games[index].setCategory(new, included: true)
+        }
+    }
+
+    public static func delete(_ name: String, in games: inout [Game]) {
+        for index in games.indices { games[index].setCategory(name, included: false) }
     }
 }
 

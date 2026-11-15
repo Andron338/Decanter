@@ -804,6 +804,35 @@ final class AppModel {
         if programChanged { loadArtwork(for: game) }
     }
 
+    var categories: [String] { GameCategories.all(in: games) }
+
+    /// A game waiting for the name of a new category to put it in.
+    var namingCategory: Game?
+    /// A category waiting for its new name.
+    var renamingCategory: String?
+
+    func toggleHidden(_ game: Game) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        games[index].hidden = games[index].isHidden ? nil : true
+        LibraryStore.save(games)
+    }
+
+    func setCategory(_ name: String, included: Bool, for game: Game) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        games[index].setCategory(name, included: included)
+        LibraryStore.save(games)
+    }
+
+    func renameCategory(_ old: String, to new: String) {
+        GameCategories.rename(old, to: new, in: &games)
+        LibraryStore.save(games)
+    }
+
+    func deleteCategory(_ name: String) {
+        GameCategories.delete(name, in: &games)
+        LibraryStore.save(games)
+    }
+
     func toggleFavorite(_ game: Game) {
         guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
         games[index].favorite = games[index].isFavorite ? nil : true
