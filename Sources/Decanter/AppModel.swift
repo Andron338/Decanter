@@ -121,6 +121,7 @@ final class AppModel {
     private static func loadLibrary() -> [Game] {
         var games = LibraryStore.load()
         var changed = false
+        for index in games.indices where games[index].keepSteamOnWine10() { changed = true }
         // Steam games were once inspected through steam.exe or Unreal's launcher stub, which name no graphics.
         for index in games.indices where games[index].requirements == nil
             || (games[index].steamAppID != nil && games[index].requirements?.directX.isEmpty == true) {
@@ -774,15 +775,13 @@ final class AppModel {
         game.steamAppID != nil || URL(fileURLWithPath: game.executablePath).lastPathComponent.lowercased() == "steam.exe"
     }
 
-    /// Wine can only end a whole prefix at once, so this also ends anything else running in the
-    /// game's bottle on the same engine.
+    /// Wine can only end a whole prefix at once, so this ends everything running in the game's
+    /// bottle, on every engine: the game may have been started on another engine than its settings
+    /// now name, and a Steam started there keeps running after Decanter loses track of it.
     func stop(_ game: Game) {
         guard let runtime else { return }
-        let engine = runtime.engine(for: game.settings.renderer)
         Task {
-            if let prefix = bottle(game.bottleID)?.prefix(for: engine) {
-                await Launcher.stop(prefix: prefix, engine: engine, runtime: runtime)
-            }
+            if let bottle = bottle(game.bottleID) { await Launcher.stop(bottle, runtime: runtime) }
             running.remove(game.id)
         }
     }
@@ -794,6 +793,7 @@ final class AppModel {
         var game = game
         let programChanged = games[index].executablePath != game.executablePath
         if programChanged { game.inspect(chooseRenderer: false) }
+        game.keepSteamOnWine10()
         // Play time and the cover lookup can change while the settings sheet holds an older copy.
         game.playSeconds = games[index].playSeconds
         game.lastPlayed = games[index].lastPlayed

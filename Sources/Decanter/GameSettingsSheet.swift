@@ -255,7 +255,9 @@ struct GameSettingsSheet: View {
                         Toggle("Ray tracing (DXR)", isOn: $game.settings.rayTracing)
                         Toggle("DLSS through MetalFX", isOn: $game.settings.metalFX)
                         Toggle("Report AVX support to the game", isOn: $game.settings.advertiseAVX)
-                        Text("D3DMetal runs on Apple's own Wine with a separate Windows environment, so saves and anything an installer set up don't carry over from the other renderers.")
+                        Text(Launcher.startsThroughSteam(game)
+                             ? "Steam crashes on Apple's own Wine, so this game will run on Wine 10 with D3DMetal, beside Steam."
+                             : "D3DMetal runs on Apple's own Wine with a separate Windows environment, so saves and anything an installer set up don't carry over from the other renderers.")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         D3DMetalInstallRow()

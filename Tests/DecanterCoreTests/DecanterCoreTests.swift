@@ -941,4 +941,18 @@ final class DecanterCoreTests: XCTestCase {
                                         graphics: ["WINEDLLPATH_DXMT": "/c/dxmt"])
         XCTAssertNil(dxmt["D3DM_ENABLE_METALFX"])
     }
+
+    func testSteamGamesOnD3DMetalMoveToWine10sD3DMetalRoute() {
+        var steam = Game(name: "S", executablePath: "/b/Steam/steam.exe", bottleID: UUID())
+        steam.steamAppID = 1643320
+        steam.settings.renderer = .d3dmetal
+        XCTAssertTrue(steam.keepSteamOnWine10())
+        XCTAssertEqual(steam.settings.renderer, .sikarugir)
+        XCTAssertEqual(steam.settings.wine10Graphics, .d3dmetal)
+        XCTAssertFalse(steam.keepSteamOnWine10())
+        var plain = Game(name: "X", executablePath: "/g/x.exe", bottleID: UUID())
+        plain.settings.renderer = .d3dmetal
+        XCTAssertFalse(plain.keepSteamOnWine10())
+        XCTAssertEqual(plain.settings.renderer, .d3dmetal)
+    }
 }

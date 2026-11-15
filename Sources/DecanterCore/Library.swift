@@ -99,11 +99,22 @@ public struct Game: Codable, Identifiable, Equatable {
     /// The program that is the game: for a Steam game, the one in its folder rather than `steam.exe`.
     public var programPath: String { steamAppID != nil ? (iconPath ?? executablePath) : executablePath }
 
+    /// Steam crashes on Apple's own Wine, so for a game Steam starts, D3DMetal means the Wine 10
+    /// engine's D3DMetal route, where Steam runs. True when that changed the settings.
+    @discardableResult
+    public mutating func keepSteamOnWine10() -> Bool {
+        guard Launcher.startsThroughSteam(self), settings.renderer == .d3dmetal else { return false }
+        settings.renderer = .sikarugir
+        settings.wine10Graphics = .d3dmetal
+        return true
+    }
+
     /// Reads the executable and, when `chooseRenderer` is set, switches to the renderer that suits it.
     public mutating func inspect(chooseRenderer: Bool) {
         requirements = ExecutableInspector.inspect(URL(fileURLWithPath: programPath))
         if chooseRenderer, let renderer = requirements?.recommendedRenderer {
             settings.renderer = renderer
+            keepSteamOnWine10()
         }
     }
 }
