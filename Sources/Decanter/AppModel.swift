@@ -189,6 +189,12 @@ final class AppModel {
     /// Adds a game that is already installed (or portable) somewhere on disk. Its bottle's prefix is
     /// made the first time it is played.
     private func addExecutable(_ url: URL, bottleID: UUID? = nil, engine: Engine? = nil) {
+        var bottleID = bottleID, engine = engine
+        // A program dropped from inside a bottle's drive_c belongs to that bottle, not the default one.
+        if bottleID == nil, let owner = BottleList(bottles: bottles).owner(of: url) {
+            bottleID = owner.bottle.id
+            engine = owner.engine
+        }
         var game = Game(name: GameNaming.displayName(for: url), executablePath: url.path,
                         bottleID: bottleID ?? sharedBottle().id)
         game.inspect(chooseRenderer: true)
@@ -804,6 +810,35 @@ final class AppModel {
         if programChanged { loadArtwork(for: game) }
     }
 
+    var categories: [String] { GameCategories.all(in: games) }
+
+    /// A game waiting for the name of a new category to put it in.
+    var namingCategory: Game?
+    /// A category waiting for its new name.
+    var renamingCategory: String?
+
+    func toggleHidden(_ game: Game) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        games[index].hidden = games[index].isHidden ? nil : true
+        LibraryStore.save(games)
+    }
+
+    func setCategory(_ name: String, included: Bool, for game: Game) {
+        guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
+        games[index].setCategory(name, included: included)
+        LibraryStore.save(games)
+    }
+
+    func renameCategory(_ old: String, to new: String) {
+        GameCategories.rename(old, to: new, in: &games)
+        LibraryStore.save(games)
+    }
+
+    func deleteCategory(_ name: String) {
+        GameCategories.delete(name, in: &games)
+        LibraryStore.save(games)
+    }
+
     func toggleFavorite(_ game: Game) {
         guard let index = games.firstIndex(where: { $0.id == game.id }) else { return }
         games[index].favorite = games[index].isFavorite ? nil : true
@@ -818,6 +853,16 @@ final class AppModel {
 
     func showInFinder(_ game: Game) {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: game.executablePath)])
+    }
+
+    /// Opens the folder the game's program is in, where its saves, configs and mods usually live.
+    func openGameFolder(_ game: Game) {
+        let folder = URL(fileURLWithPath: game.executablePath).deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: folder.path) else {
+            errorMessage = "“\(game.name)”'s folder is gone: \(folder.path)"
+            return
+        }
+        NSWorkspace.shared.open(folder)
     }
 
     // MARK: Artwork

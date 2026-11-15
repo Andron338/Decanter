@@ -142,6 +142,31 @@ open build/Decanter.app
 Requires Xcode 15+ (Swift 5.9+) and macOS 14+. `swift test` runs the core tests.
 `swift run decanter-cli setup|d3dmetal|crossover|status|inspect|install|scan` drives the same setup and install code without the UI. `Package.swift` opens directly in Xcode.
 
+## CI and releases (local)
+
+There is no hosted CI: these scripts run on your Mac.
+
+```bash
+git config core.hooksPath .githooks   # once: build and test before every push
+```
+
+```bash
+./Scripts/ci.sh            # build, test, bundle, verify the signature, zip into dist/
+```
+
+```bash
+./Scripts/release.sh 0.2.0 --dry-run   # everything except tagging and publishing
+```
+
+```bash
+./Scripts/release.sh 0.2.0             # CI, tag v0.2.0, push, publish a GitHub release with the zip
+```
+
+Releases come from `master` with a clean tree (`--prerelease` allows any branch). Publishing needs
+the GitHub CLI, signed in once: `brew install gh && gh auth login`. The release notes list the commits
+since the previous tag. Builds are ad-hoc signed, not notarized, so downloaders have to clear the
+quarantine flag; the notes say how.
+
 ## Layout
 
 - `Sources/DecanterCore` — no UI: runtime setup, bottles, library, launch planning.

@@ -1,0 +1,4 @@
+#!/bin/bash
+# Runs the quick local CI (build + tests) before every push. Skip once with: git push --no-verify
+# Enabled by: git config core.hooksPath .githooks
+exec "$(git rev-parse --show-toplevel)/Scripts/ci.sh" --quick

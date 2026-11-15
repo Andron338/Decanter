@@ -193,6 +193,18 @@ struct GameMenu: View {
         Button("Configure…", systemImage: "gearshape") { model.editing = game }
         Button(game.isFavorite ? "Remove from Favorites" : "Add to Favorites",
                systemImage: game.isFavorite ? "star.slash" : "star") { model.toggleFavorite(game) }
+        Menu("Categories", systemImage: "tag") {
+            ForEach(model.categories, id: \.self) { name in
+                Toggle(name, isOn: Binding(
+                    get: { game.isIn(category: name) },
+                    set: { model.setCategory(name, included: $0, for: game) }))
+            }
+            if !model.categories.isEmpty { Divider() }
+            Button("New Category…") { model.namingCategory = game }
+        }
+        Button(game.isHidden ? "Unhide" : "Hide", systemImage: game.isHidden ? "eye" : "eye.slash") {
+            model.toggleHidden(game)
+        }
         Divider()
         Menu("Cover", systemImage: "photo") {
             Button("Choose Image…") { model.chooseCover(for: game) }
@@ -202,7 +214,8 @@ struct GameMenu: View {
             }
         }
         Divider()
-        Button("Show Program in Finder", systemImage: "folder") { model.showInFinder(game) }
+        Button("Open Game Folder", systemImage: "folder") { model.openGameFolder(game) }
+        Button("Show Program in Finder", systemImage: "magnifyingglass") { model.showInFinder(game) }
         Button("Open C: Drive", systemImage: "externaldrive") { model.openDriveC(game) }
         Button("Show Log", systemImage: "doc.text") { model.showLog(game) }
         Divider()

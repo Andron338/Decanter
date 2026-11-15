@@ -23,7 +23,10 @@ struct DecanterApp: App {
                 }
         }
         .defaultSize(width: 960, height: 640)
-        .commands { CommandGroup(replacing: .newItem) {} }
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+            GameCommands(model: model)
+        }
 
         Settings {
             PreferencesView().environment(model)
@@ -119,5 +122,56 @@ struct SetupView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .keyboardShortcut(.defaultAction)
+    }
+}
+
+/// The Game menu: shortcuts for the game selected in the library.
+struct GameCommands: Commands {
+    let model: AppModel
+    @FocusedValue(\.selectedGameID) private var selectedID
+
+    private var game: Game? { model.games.first { $0.id == selectedID } }
+
+    var body: some Commands {
+        CommandMenu("Game") {
+            let isRunning = game.map { model.running.contains($0.id) } ?? false
+            Button(isRunning ? "Stop" : "Play") {
+                guard let game else { return }
+                isRunning ? model.stop(game) : model.play(game)
+            }
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(game == nil)
+            Button("Configure…") { model.editing = game }
+                .keyboardShortcut("i")
+                .disabled(game == nil)
+            Divider()
+            Button(game?.isFavorite == true ? "Remove from Favorites" : "Add to Favorites") {
+                if let game { model.toggleFavorite(game) }
+            }
+            .keyboardShortcut("d")
+            .disabled(game == nil)
+            Button(game?.isHidden == true ? "Unhide" : "Hide") {
+                if let game { model.toggleHidden(game) }
+            }
+            .keyboardShortcut("h", modifiers: [.command, .option, .shift])
+            .disabled(game == nil)
+            Button("New Category…") { model.namingCategory = game }
+                .disabled(game == nil)
+            Divider()
+            Button("Open Game Folder") {
+                if let game { model.openGameFolder(game) }
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
+            .disabled(game == nil)
+            Button("Show Program in Finder") {
+                if let game { model.showInFinder(game) }
+            }
+            .keyboardShortcut("r")
+            .disabled(game == nil)
+            Divider()
+            Button("Remove…") { model.pendingRemoval = game }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(game == nil)
+        }
     }
 }

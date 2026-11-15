@@ -968,4 +968,49 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(Launcher.steamGraphics(for: game), "metal")
         XCTAssertFalse(Launcher.wineIsRunning(in: URL(fileURLWithPath: "/nonexistent/prefix")))
     }
+
+    func testCategoriesAreMatchedLooselyAndExistWhileUsed() {
+        var a = Game(name: "A", executablePath: "/a.exe", bottleID: UUID())
+        var b = Game(name: "B", executablePath: "/b.exe", bottleID: UUID())
+        a.setCategory("  Co-op ", included: true)
+        a.setCategory("co-op", included: true)
+        a.setCategory("   ", included: true)
+        XCTAssertEqual(a.categoryNames, ["co-op"])
+        b.setCategory("Finished", included: true)
+        b.setCategory("CO-OP", included: true)
+        var games = [a, b]
+        XCTAssertEqual(GameCategories.all(in: games), ["co-op", "Finished"])
+        XCTAssertTrue(games[1].isIn(category: "co-op"))
+
+        GameCategories.rename("Co-Op", to: "Finished", in: &games)
+        XCTAssertEqual(games[0].categoryNames, ["Finished"])
+        XCTAssertEqual(games[1].categoryNames, ["Finished"])
+        GameCategories.delete("finished", in: &games)
+        XCTAssertNil(games[0].categories)
+        XCTAssertEqual(GameCategories.all(in: games), [])
+    }
+
+    func testHiddenAndCategoriesSurviveSaving() throws {
+        var game = Game(name: "A", executablePath: "/a.exe", bottleID: UUID())
+        XCTAssertFalse(game.isHidden)
+        game.hidden = true
+        game.setCategory("Finished", included: true)
+        let decoded = try JSONDecoder().decode(Game.self, from: JSONEncoder().encode(game))
+        XCTAssertTrue(decoded.isHidden)
+        XCTAssertEqual(decoded.categoryNames, ["Finished"])
+    }
+
+    func testProgramInsideABottlePrefixBelongsToThatBottle() {
+        let crossoverPrefix = UUID(), winePrefix = UUID()
+        let game = Bottle(name: "Game", prefixes: [Engine.crossover.rawValue: crossoverPrefix,
+                                                   Engine.wine.rawValue: winePrefix])
+        let other = Bottle(name: "Other", prefixes: [Engine.crossover.rawValue: UUID()])
+        let list = BottleList(bottles: [other, game], defaultID: other.id)
+        let exe = BottleStore.prefix(crossoverPrefix)
+            .appendingPathComponent("drive_c/Program Files (x86)/Game/Game.exe")
+        let owner = list.owner(of: exe)
+        XCTAssertEqual(owner?.bottle.id, game.id)
+        XCTAssertEqual(owner?.engine, .crossover)
+        XCTAssertNil(list.owner(of: URL(fileURLWithPath: "/Users/me/Downloads/Game/autorun.exe")))
+    }
 }

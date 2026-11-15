@@ -10,6 +10,17 @@ struct GameSettingsSheet: View {
     @State var game: Game
     @State private var tab = Tab.info
     @State private var searchingCover = false
+    @State private var newCategory = ""
+
+    /// Categories already in the library plus any this sheet added and hasn't saved yet.
+    private var categoryChoices: [String] {
+        GameCategories.all(in: model.games.filter { $0.id != game.id } + [game])
+    }
+
+    private func addCategory() {
+        game.setCategory(newCategory, included: true)
+        newCategory = ""
+    }
     /// Set when the game's program is a launcher menu that Decanter knows how to skip.
     @State private var directStart: LauncherDetector.DirectStart?
 
@@ -89,6 +100,26 @@ struct GameSettingsSheet: View {
                     TextField("Name", text: $game.name)
                     Toggle("Favorite", isOn: Binding(
                         get: { game.isFavorite }, set: { game.favorite = $0 ? true : nil }))
+                    Toggle(isOn: Binding(get: { game.isHidden }, set: { game.hidden = $0 ? true : nil })) {
+                        Text("Hidden")
+                        Text("Shown only under Hidden in the sidebar.")
+                    }
+                    LabeledContent("Categories") {
+                        Menu(game.categoryNames.isEmpty ? "None" : game.categoryNames.joined(separator: ", ")) {
+                            ForEach(categoryChoices, id: \.self) { name in
+                                Toggle(name, isOn: Binding(
+                                    get: { game.isIn(category: name) },
+                                    set: { game.setCategory(name, included: $0) }))
+                            }
+                        }
+                        .fixedSize()
+                    }
+                    HStack {
+                        TextField("New category", text: $newCategory, prompt: Text("Name"))
+                            .onSubmit(addCategory)
+                        Button("Add", action: addCategory)
+                            .disabled(GameCategories.clean(newCategory).isEmpty)
+                    }
                 }
                 Section("Activity") {
                     LabeledContent("Last played") {
