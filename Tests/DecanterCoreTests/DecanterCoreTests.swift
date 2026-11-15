@@ -1000,6 +1000,298 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(decoded.categoryNames, ["Finished"])
     }
 
+    private func withHome(_ body: (URL) throws -> Void) throws {
+        let home = try temporaryFolder()
+        let saved = Paths.root
+        Paths.root = home
+        StoreFile.reset()
+        defer { Paths.root = saved; StoreFile.reset() }
+        try body(home)
+    }
+
+    private func asideFiles(in home: URL, named stem: String) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: home, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(stem + ".unreadable-") }
+    }
+
+    func testALibraryWithAnUnreadableGameKeepsTheRestAndAKeptCopy() throws {
+        try withHome { home in
+            let good = Game(name: "Good", executablePath: "/g.exe", bottleID: UUID())
+            var entries = try JSONSerialization.jsonObject(with: JSONEncoder().encode([good, good])) as! [Any]
+            entries[1] = ["name": "Broken"]  // no id, path or bottle
+            let original = try JSONSerialization.data(withJSONObject: entries)
+            try original.write(to: Paths.library)
+
+            XCTAssertEqual(LibraryStore.load().map(\.name), ["Good"])
+            let kept = try asideFiles(in: home, named: "library")
+            XCTAssertEqual(kept.count, 1)
+            XCTAssertEqual(try Data(contentsOf: kept[0]), original)
+            XCTAssertEqual(LibraryStore.takeLoadProblems().count, 1)
+            // The salvaged library was written back, so the next load is clean.
+            XCTAssertEqual(LibraryStore.load().map(\.name), ["Good"])
+            XCTAssertTrue(LibraryStore.takeLoadProblems().isEmpty)
+            XCTAssertEqual(try asideFiles(in: home, named: "library").count, 1)
+        }
+    }
+
+    func testALibraryThatIsNotJSONIsKeptAsideNotOverwritten() throws {
+        try withHome { home in
+            let original = Data("{ not json".utf8)
+            try original.write(to: Paths.library)
+            XCTAssertTrue(LibraryStore.load().isEmpty)
+            XCTAssertEqual(try asideFiles(in: home, named: "library").map { try Data(contentsOf: $0) }, [original])
+            XCTAssertFalse(LibraryStore.takeLoadProblems().isEmpty)
+            LibraryStore.save([Game(name: "New", executablePath: "/n.exe", bottleID: UUID())])
+            XCTAssertEqual(LibraryStore.load().map(\.name), ["New"])
+        }
+    }
+
+    func testADamagedBottleListKeepsItsReadableBottles() throws {
+        try withHome { home in
+            let bottle = Bottle(name: "Kept")
+            var object = try JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(BottleList(bottles: [bottle], defaultID: bottle.id))) as! [String: Any]
+            object["bottles"] = (object["bottles"] as! [Any]) + [["name": 5]]
+            try JSONSerialization.data(withJSONObject: object).write(to: Paths.bottleList)
+            let list = BottleStore.load()
+            XCTAssertEqual(list.bottles.map(\.name), ["Kept"])
+            XCTAssertEqual(list.defaultID, bottle.id)
+            XCTAssertEqual(try asideFiles(in: home, named: "bottles").count, 1)
+        }
+    }
+
+    func testALibraryThatCannotBeOpenedIsNeverSavedOver() throws {
+        try withHome { _ in
+            let original = try JSONEncoder().encode([Game(name: "Mine", executablePath: "/m.exe", bottleID: UUID())])
+            try original.write(to: Paths.library)
+            try FileManager.default.setAttributes([.posixPermissions: 0o200], ofItemAtPath: Paths.library.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: Paths.library.path) }
+            XCTAssertTrue(LibraryStore.load().isEmpty)
+            LibraryStore.save([])
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: Paths.library.path)
+            XCTAssertEqual(try Data(contentsOf: Paths.library), original)
+        }
+    }
+
+    private func steamGame(program: String, prefix: URL) -> Game {
+        let steam = prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam")
+        var game = Game(name: "Rise", executablePath: steam.appendingPathComponent("steam.exe").path, bottleID: UUID())
+        game.steamAppID = 287450
+        game.iconPath = steam.appendingPathComponent("steamapps/common/\(program)").path
+        return game
+    }
+
+    func testSteamGamesAreFollowedByTheirOwnProcesses() throws {
+        let prefix = URL(fileURLWithPath: "/D/Bottles/X/prefix")
+        let game = steamGame(program: "Rise of Nations/riseofnations.exe", prefix: prefix)
+        let watch = try XCTUnwrap(GameProcesses.watch(for: game, prefix: prefix))
+        XCTAssertEqual(watch.name, "riseofnations.exe")
+
+        let match = { GameProcesses.matches($0, watch) }
+        XCTAssertTrue(match(#"C:\Program Files (x86)\Steam\steamapps\common\Rise of Nations\riseofnations.exe -nointro"#))
+        XCTAssertTrue(match(#"/rt/bin/wine-preloader "C:\PROGRAM FILES (X86)\STEAM\STEAMAPPS\COMMON\RISE OF NATIONS\RiseOfNations.exe""#))
+        // Anything from the game's folder: Unreal's stub starts a Shipping program in a subfolder.
+        XCTAssertTrue(match(#"C:\Program Files (x86)\Steam\steamapps\common\Rise of Nations\Bin\Win64\Rise-Shipping.exe"#))
+        XCTAssertTrue(match("riseofnations.exe"))
+        XCTAssertFalse(match(#"C:\Games\myriseofnations.exe"#))
+        XCTAssertFalse(match(#"C:\Games\riseofnations.exe.bak"#))
+        XCTAssertFalse(match(#"C:\Program Files (x86)\Steam\steam.exe -applaunch 287450"#))
+        XCTAssertFalse(match(#"C:\windows\system32\winedevice.exe"#))
+
+        // Games that aren't started through Steam are followed by the process Decanter starts.
+        var plain = game
+        plain.steamAppID = nil
+        plain.executablePath = game.iconPath!
+        XCTAssertNil(GameProcesses.watch(for: plain, prefix: prefix))
+        // Without the game's own program there is nothing to follow but Steam.
+        var unknown = game
+        unknown.iconPath = nil
+        XCTAssertNil(GameProcesses.watch(for: unknown, prefix: prefix))
+        // A program loose in Steam's folder is matched by name only.
+        let loose = steamGame(program: "../game.exe", prefix: prefix)
+        XCTAssertEqual(GameProcesses.watch(for: loose, prefix: prefix)?.folders, [])
+    }
+
+    func testAHandMadeApplaunchGameIsFollowedThroughSteamsManifest() throws {
+        let prefix = try temporaryFolder().appendingPathComponent("prefix")
+        let steam = prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam")
+        let steamapps = steam.appendingPathComponent("steamapps")
+        try FileManager.default.createDirectory(at: steamapps.appendingPathComponent("common/Rise of Nations"),
+                                                withIntermediateDirectories: true)
+        try """
+        "AppState" { "appid" "287450" "name" "Rise of Nations: Extended Edition" "installdir" "Rise of Nations" "StateFlags" "4" }
+        """.write(to: steamapps.appendingPathComponent("appmanifest_287450.acf"), atomically: true, encoding: .utf8)
+
+        // Set up by hand: Steam's program and the launch arguments, nothing else.
+        var game = Game(name: "Rise", executablePath: steam.appendingPathComponent("steam.exe").path, bottleID: UUID())
+        game.settings.arguments = "-applaunch 287450"
+        let watch = try XCTUnwrap(GameProcesses.watch(for: game, prefix: prefix))
+        XCTAssertEqual(watch.name, "")
+        XCTAssertTrue(GameProcesses.matches(#"C:\Program Files (x86)\Steam\steamapps\common\Rise of Nations\patriots.exe"#, watch))
+        XCTAssertFalse(GameProcesses.matches(#"C:\Program Files (x86)\Steam\steam.exe -applaunch 287450"#, watch))
+        XCTAssertFalse(GameProcesses.matches("patriots.exe", watch))
+
+        // An app Steam hasn't installed in this bottle leaves nothing to follow.
+        game.settings.arguments = "-applaunch 999"
+        XCTAssertNil(GameProcesses.watch(for: game, prefix: prefix))
+    }
+
+    private func asset(_ name: String, digest: String?) -> GitHubRelease.Asset {
+        GitHubRelease.Asset(name: name, size: 1, browser_download_url: URL(string: "https://example.invalid/\(name)")!,
+                            digest: digest)
+    }
+
+    func testOnlyDownloadsWithAChecksumArePicked() {
+        let good = "sha256:" + String(repeating: "ab", count: 32)
+        XCTAssertEqual(asset("a", digest: good).sha256, String(repeating: "ab", count: 32))
+        XCTAssertEqual(asset("a", digest: good.uppercased()).sha256, String(repeating: "ab", count: 32))
+        XCTAssertNil(asset("a", digest: nil).sha256)
+        XCTAssertNil(asset("a", digest: "sha1:" + String(repeating: "ab", count: 20)).sha256)
+        XCTAssertNil(asset("a", digest: "sha256:abc").sha256)
+        XCTAssertNil(asset("a", digest: "sha256:" + String(repeating: "zz", count: 32)).sha256)
+
+        // The newest release has no checksum, so the one before it is used; prereleases never are.
+        let releases = [
+            GitHubRelease(tag_name: "12.0-rc", prerelease: true, assets: [asset("wine-staging-12.0-rc.tar.xz", digest: good)]),
+            GitHubRelease(tag_name: "11.22", prerelease: false, assets: [asset("wine-staging-11.22.tar.xz", digest: nil)]),
+            GitHubRelease(tag_name: "11.21", prerelease: false, assets: [asset("wine-staging-11.21.tar.xz", digest: good)]),
+        ]
+        XCTAssertEqual(RuntimeManager.latestAsset(in: releases) { $0.hasPrefix("wine-staging-") }?.tag, "11.21")
+        XCTAssertNil(RuntimeManager.latestAsset(in: Array(releases.prefix(2))) { $0.hasPrefix("wine-staging-") })
+
+        let engines = [GitHubRelease(tag_name: "v1.0", prerelease: false, assets: [
+            asset("WS12WineCX24.0.7_6.tar.xz", digest: good),
+            asset("WS12WineCX24.0.7_10.tar.xz", digest: nil),
+            asset("WS12WineCX24.0.7_7.tar.xz", digest: good),
+            asset("WS12WineSikarugir10.0_8.tar.xz", digest: good),
+        ])]
+        XCTAssertEqual(RuntimeManager.newestEngine(named: "WS12WineCX", in: engines)?.tag, "WS12WineCX24.0.7_7")
+        XCTAssertNil(RuntimeManager.newestEngine(named: "WS12WineSikarugir11", in: engines))
+    }
+
+    func testShellCapturesOutputAndStatus() async throws {
+        let result = try await Shell.run("/bin/sh", ["-c", "echo out; echo err >&2; exit 3"], check: false)
+        XCTAssertEqual(result.status, 3)
+        XCTAssertEqual(Set(result.output.split(separator: "\n")), ["out", "err"])
+        do {
+            try await Shell.run("/bin/sh", ["-c", "echo why; exit 2"])
+            XCTFail("a failing command should throw")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("status 2"))
+            XCTAssertTrue(error.localizedDescription.contains("why"))
+        }
+    }
+
+    func testShellStopsAProgramThatRunsTooLong() async {
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            try await Shell.run("/bin/sleep", ["30"], check: false, timeout: .milliseconds(200))
+            XCTFail("the timeout should throw")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("didn't finish within"), "\(error)")
+        }
+        XCTAssertLessThan(clock.now - started, .seconds(5))
+    }
+
+    func testShellStopsWhenItsTaskIsCancelled() async {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let task = Task { try await Shell.run("/bin/sleep", ["30"], check: false) }
+        try? await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        let result = await task.result
+        XCTAssertThrowsError(try result.get()) { XCTAssertTrue($0 is CancellationError, "\($0)") }
+        XCTAssertLessThan(clock.now - started, .seconds(5))
+
+        // Cancelled before it even starts: it never runs to completion either.
+        let early = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await Shell.run("/bin/sleep", ["30"], check: false)
+        }
+        let earlyResult = await early.result
+        XCTAssertThrowsError(try earlyResult.get())
+        XCTAssertLessThan(clock.now - started, .seconds(10))
+    }
+
+    func testShellDoesNotWaitForABackgroundChildHoldingItsOutput() async throws {
+        let clock = ContinuousClock()
+        let started = clock.now
+        // Like wine starting wineserver: the child keeps the output pipe open after its parent exits.
+        let result = try await Shell.run("/bin/sh", ["-c", "sleep 30 & echo started"])
+        XCTAssertEqual(result.output.trimmingCharacters(in: .whitespacesAndNewlines), "started")
+        XCTAssertLessThan(clock.now - started, .seconds(5))
+        _ = try? await Shell.run("/usr/bin/pkill", ["-f", "^sleep 30$"], check: false)
+    }
+
+    func testDurationsReadNaturally() {
+        XCTAssertEqual(Duration.seconds(300).spokenLength, "5 minutes")
+        XCTAssertEqual(Duration.seconds(60).spokenLength, "a minute")
+        XCTAssertEqual(Duration.seconds(90).spokenLength, "90 seconds")
+        XCTAssertEqual(Duration.milliseconds(200).spokenLength, "0 seconds")
+    }
+
+    func testEngineBuildsArePinnedByNameAndChecksum() async throws {
+        for pin in EngineBuilds.all {
+            XCTAssertEqual(pin.asset.sha256, pin.sha256, pin.file)
+            XCTAssertEqual(pin.url.absoluteString,
+                           "https://github.com/\(pin.repo)/releases/download/\(pin.release)/\(pin.file)")
+        }
+        XCTAssertEqual(Set(EngineBuilds.all.map(\.sha256)).count, EngineBuilds.all.count)
+        // The engines' versions name their folders, as the newest-build lookup names them.
+        for pin in [EngineBuilds.crossOver, EngineBuilds.wine10] {
+            XCTAssertEqual(pin.version + ".tar.xz", pin.file)
+        }
+        XCTAssertTrue(EngineBuilds.crossOver.file.hasPrefix(RuntimeManager.crossoverPrefix))
+        XCTAssertTrue(EngineBuilds.wine10.file.hasPrefix(RuntimeManager.sikarugirPrefix))
+
+        // By default the pin is used, without asking GitHub anything.
+        let saved = EngineBuilds.useNewest
+        defer { EngineBuilds.useNewest = saved }
+        EngineBuilds.useNewest = false
+        let pinned = try await RuntimeManager.build(EngineBuilds.wine) { throw DecanterError("looked upstream") }
+        XCTAssertEqual(pinned.tag, "11.21")
+        XCTAssertEqual(pinned.asset.name, "wine-staging-11.21-osx64.tar.xz")
+        EngineBuilds.useNewest = true
+        let newest = try await RuntimeManager.build(EngineBuilds.wine) { ("12.0", self.asset("wine-staging-12.0.tar.xz", digest: nil)) }
+        XCTAssertEqual(newest.tag, "12.0")
+    }
+
+    /// Hands out one process list per call, repeating the last.
+    private final class FakeProcesses: @unchecked Sendable {
+        private var lists: [[String]]
+        private let lock = NSLock()
+        init(_ lists: [[String]]) { self.lists = lists }
+        func next() -> [String] {
+            lock.lock(); defer { lock.unlock() }
+            return lists.count > 1 ? lists.removeFirst() : lists[0]
+        }
+    }
+
+    func testASteamSessionLastsWhileTheGameRuns() async {
+        let watch = GameProcesses.Watch(name: "game.exe", folders: [])
+        let game = #"C:\Games\game.exe"#, steam = #"C:\Steam\steam.exe"#
+        // Steam first, then the game, a gap while its launcher hands over, more game, then gone.
+        let fake = FakeProcesses([[steam], [steam], [game], [game], [], [game], [game], [], [], []])
+        let played = await GameProcesses.waitForSession(of: watch, poll: .milliseconds(10),
+                                                        commandLines: { fake.next() })
+        let seconds = try? XCTUnwrap(played)
+        XCTAssertNotNil(seconds)
+        // Started on the third list and last seen on the seventh: about four polls.
+        XCTAssertGreaterThan(seconds ?? 0, 0.03)
+        XCTAssertLessThan(seconds ?? 1, 0.5)
+    }
+
+    func testASteamGameThatNeverStartsEndsTheWait() async {
+        let watch = GameProcesses.Watch(name: "game.exe", folders: [])
+        let gaveUp = await GameProcesses.waitForSession(of: watch, appearWithin: .milliseconds(50),
+                                                        poll: .milliseconds(10), commandLines: { [] })
+        XCTAssertNil(gaveUp)
+        let stopped = await GameProcesses.waitForSession(of: watch, poll: .milliseconds(10),
+                                                         stillStarting: { false }, commandLines: { [] })
+        XCTAssertNil(stopped)
+    }
+
     func testProgramInsideABottlePrefixBelongsToThatBottle() {
         let crossoverPrefix = UUID(), winePrefix = UUID()
         let game = Bottle(name: "Game", prefixes: [Engine.crossover.rawValue: crossoverPrefix,

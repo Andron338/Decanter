@@ -259,6 +259,56 @@ public struct InstalledRuntime: Codable, Equatable {
     }
 }
 
+/// A build Decanter was tested with: fetched by its exact name and checked against the checksum
+/// recorded here, not against whatever the release page says at the time.
+struct PinnedBuild: Equatable, Sendable {
+    let repo: String
+    /// The GitHub release the file is attached to.
+    let release: String
+    let file: String
+    let sha256: String
+    /// What the installed copy is called by (its folder name and `InstalledRuntime` tag).
+    let version: String
+
+    var url: URL { URL(string: "https://github.com/\(repo)/releases/download/\(release)/\(file)")! }
+
+    var asset: GitHubRelease.Asset {
+        GitHubRelease.Asset(name: file, size: 0, browser_download_url: url, digest: "sha256:" + sha256)
+    }
+}
+
+/// Which builds of Wine, DXMT and the engines a new install gets.
+///
+/// By default, the ones listed here: each was tried with real games before being listed, so a bad
+/// upstream release can't break setup, and every install of one Decanter version gets the same
+/// files. Raising a pin is a deliberate change, made after trying the new build.
+public enum EngineBuilds {
+    /// Take the newest upstream builds instead (still only ones with a checksum). Untested, for
+    /// trying what's new. The app sets it from its settings; `DECANTER_NEWEST_ENGINES=1` sets it
+    /// for the command-line tool.
+    public static var useNewest = ProcessInfo.processInfo.environment["DECANTER_NEWEST_ENGINES"] == "1"
+
+    static let wine = PinnedBuild(
+        repo: "Gcenx/macOS_Wine_builds", release: "11.21", file: "wine-staging-11.21-osx64.tar.xz",
+        sha256: "d7bcd5abf4df27aae397a7898aef074fea4a2e0b51e0a55aa9659517bbf9d452", version: "11.21")
+    static let dxmt = PinnedBuild(
+        repo: "3Shain/dxmt", release: "v0.80", file: "dxmt-v0.80-builtin.tar.gz",
+        sha256: "8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d", version: "v0.80")
+    static let gamePortingToolkit = PinnedBuild(
+        repo: "Gcenx/game-porting-toolkit", release: "Game-Porting-Toolkit-3.0-3", file: "game-porting-toolkit-3.0-3.tar.xz",
+        sha256: "d377683937340f914823dbb2e1252b329cbf834ff58907d0293db8cebf0e392e", version: "Game-Porting-Toolkit-3.0-3")
+    /// The build GTA: San Andreas and Need for Speed Carbon were played on. GitHub keeps no checksum
+    /// for it, so this one was taken from the file itself (Nov 2026), which matched the copy in use.
+    static let crossOver = PinnedBuild(
+        repo: "Sikarugir-App/Engines", release: "v1.0", file: "WS12WineCX24.0.7.tar.xz",
+        sha256: "b4205cb2540f78d4bc5543c3418ffca576063eee6b7481730921bde78ebf4851", version: "WS12WineCX24.0.7")
+    static let wine10 = PinnedBuild(
+        repo: "Sikarugir-App/Engines", release: "v1.0", file: "WS12WineSikarugir10.0_8.tar.xz",
+        sha256: "2a6bcf2a3bf13cddf825599b6bc1e3659cbf71e1282c6d77141a92f6ac8d4c68", version: "WS12WineSikarugir10.0_8")
+
+    static let all = [wine, dxmt, gamePortingToolkit, crossOver, wine10]
+}
+
 public struct SetupProgress: Sendable {
     public let stage: String
     /// nil = indeterminate
@@ -327,11 +377,12 @@ public enum RuntimeManager {
 
     public static func setup(progress: @escaping ProgressHandler) async throws -> InstalledRuntime {
         try [Paths.runtimes, Paths.components, Paths.downloads, Paths.bottles, Paths.logs].forEach(Paths.ensure)
+        try await checkRosetta()
 
         // 1. Wine
-        progress(.init(stage: "Finding the latest Wine build…", fraction: nil))
-        let (wineTag, wineAsset) = try await latestAsset(repo: wineRepo) {
-            $0.hasPrefix("wine-staging-") && $0.hasSuffix(".tar.xz")
+        progress(.init(stage: "Finding the Wine build…", fraction: nil))
+        let (wineTag, wineAsset) = try await build(EngineBuilds.wine) {
+            try await latestAsset(repo: wineRepo) { $0.hasPrefix("wine-staging-") && $0.hasSuffix(".tar.xz") }
         }
         let wineDir = Paths.runtimes.appendingPathComponent("wine-\(wineTag)", isDirectory: true)
         let baseRoot = try await installWineArchive(wineAsset, into: wineDir, label: "Wine \(wineTag)", progress: progress)
@@ -347,6 +398,7 @@ public enum RuntimeManager {
             runtime.dxmtTag = tag
             runtime.metalPath = root.path
         } catch {
+            try Task.checkCancellation()
             progress(.init(stage: "Metal renderer unavailable (\(error.localizedDescription)) — continuing…", fraction: nil))
         }
 
@@ -364,8 +416,8 @@ public enum RuntimeManager {
         into current: InstalledRuntime, progress: @escaping ProgressHandler
     ) async throws -> InstalledRuntime {
         progress(.init(stage: "Finding the Game Porting Toolkit build…", fraction: nil))
-        let (tag, asset) = try await latestAsset(repo: gptkRepo) {
-            $0.hasPrefix("game-porting-toolkit") && $0.hasSuffix(".tar.xz")
+        let (tag, asset) = try await build(EngineBuilds.gamePortingToolkit) {
+            try await latestAsset(repo: gptkRepo) { $0.hasPrefix("game-porting-toolkit") && $0.hasSuffix(".tar.xz") }
         }
         let directory = Paths.runtimes.appendingPathComponent("gptk-\(tag)", isDirectory: true)
         let root = try await installWineArchive(asset, into: directory, label: "D3DMetal", progress: progress)
@@ -385,7 +437,9 @@ public enum RuntimeManager {
         into current: InstalledRuntime, progress: @escaping ProgressHandler
     ) async throws -> InstalledRuntime {
         progress(.init(stage: "Finding the Wine 10 engine…", fraction: nil))
-        let (tag, asset) = try await newestEngine(named: sikarugirPrefix, label: "Wine 10")
+        let (tag, asset) = try await build(EngineBuilds.wine10) {
+            try await newestEngine(named: sikarugirPrefix, label: "Wine 10")
+        }
         let directory = Paths.runtimes.appendingPathComponent("sk-\(tag)", isDirectory: true)
         let root = try await installWineArchive(asset, into: directory, label: "Wine 10 engine", progress: progress)
         var runtime = current
@@ -399,12 +453,20 @@ public enum RuntimeManager {
         return runtime
     }
 
-    /// One release of the engines repository holds every build; the newest of a line sorts last.
     private static func newestEngine(named prefix: String, label: String) async throws -> (tag: String, asset: GitHubRelease.Asset) {
-        let assets = try await GitHub.releases(crossoverRepo).flatMap(\.assets)
-            .filter { $0.name.hasPrefix(prefix) && $0.name.hasSuffix(".tar.xz") }
+        guard let found = newestEngine(named: prefix, in: try await GitHub.releases(crossoverRepo)) else {
+            throw DecanterError("No \(label) engine with a checksum to verify it by was found in \(crossoverRepo).")
+        }
+        return found
+    }
+
+    /// One release of the engines repository holds every build; the newest of a line sorts last.
+    /// Builds without a checksum (uploaded before GitHub kept them) are passed over.
+    static func newestEngine(named prefix: String, in releases: [GitHubRelease]) -> (tag: String, asset: GitHubRelease.Asset)? {
+        let assets = releases.flatMap(\.assets)
+            .filter { $0.name.hasPrefix(prefix) && $0.name.hasSuffix(".tar.xz") && $0.sha256 != nil }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        guard let asset = assets.last else { throw DecanterError("No \(label) engine found in \(crossoverRepo).") }
+        guard let asset = assets.last else { return nil }
         return (String(asset.name.dropLast(".tar.xz".count)), asset)
     }
 
@@ -413,7 +475,9 @@ public enum RuntimeManager {
         into current: InstalledRuntime, progress: @escaping ProgressHandler
     ) async throws -> InstalledRuntime {
         progress(.init(stage: "Finding the CrossOver engine…", fraction: nil))
-        let (tag, asset) = try await newestEngine(named: crossoverPrefix, label: "CrossOver")
+        let (tag, asset) = try await build(EngineBuilds.crossOver) {
+            try await newestEngine(named: crossoverPrefix, label: "CrossOver")
+        }
         let directory = Paths.runtimes.appendingPathComponent("cx-\(tag)", isDirectory: true)
         let root = try await installWineArchive(asset, into: directory, label: "CrossOver engine", progress: progress)
         var runtime = current
@@ -439,10 +503,23 @@ public enum RuntimeManager {
         let archive = Paths.downloads.appendingPathComponent(asset.name)
         try await fetch(asset, to: archive, label: "Downloading \(label)", progress: progress)
         progress(.init(stage: "Unpacking \(label)…", fraction: nil))
-        try? fm.removeItem(at: directory)
-        try Paths.ensure(directory)
-        try await Shell.run("/usr/bin/tar", ["-xJf", archive.path, "-C", directory.path])
-        try await Shell.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", directory.path], check: false)
+        // Unpacked beside its final place and moved there whole, so an unpacking that was cancelled
+        // or cut short never leaves a folder that looks installed.
+        let partial = directory.deletingLastPathComponent().appendingPathComponent(directory.lastPathComponent + ".partial")
+        try? fm.removeItem(at: partial)
+        try Paths.ensure(partial)
+        do {
+            try await Shell.run("/usr/bin/tar", ["-xJf", archive.path, "-C", partial.path], timeout: .seconds(600))
+            try await Shell.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", partial.path], check: false)
+            guard findWineRoot(in: partial) != nil else {
+                throw DecanterError("The \(label) archive didn't contain a usable Wine (no bin/wineserver).")
+            }
+            try? fm.removeItem(at: directory)
+            try fm.moveItem(at: partial, to: directory)
+        } catch {
+            try? fm.removeItem(at: partial)
+            throw error
+        }
         try? fm.removeItem(at: archive)
         guard let root = findWineRoot(in: directory) else {
             throw DecanterError("The \(label) archive didn't contain a usable Wine (no bin/wineserver).")
@@ -464,18 +541,45 @@ public enum RuntimeManager {
             // Apple's Wine doesn't bundle Mono/Gecko and would stop to ask about installing them.
             env["WINEDLLOVERRIDES"] = "mscoree,mshtml="
         }
-        try await Shell.run(runtime.wine(for: renderer), ["wineboot", "-u"], environment: env)
-        try await Shell.run(runtime.wineserver(for: renderer), ["-w"], environment: env, check: false)
-        guard BottleStore.templateReady(engine) else {
-            throw DecanterError("Wine couldn't create its Windows environment. Is Rosetta 2 installed?")
+        let wineserver = runtime.wineserver(for: renderer)
+        do {
+            // Usually about a minute. Wine that is stuck (a dialog nobody can see, a missing library)
+            // otherwise keeps setup waiting forever.
+            try await Shell.run(runtime.wine(for: renderer), ["wineboot", "-u"], environment: env, timeout: .seconds(300))
+            try await Shell.run(wineserver, ["-w"], environment: env, check: false, timeout: .seconds(120))
+            guard BottleStore.templateReady(engine) else {
+                throw DecanterError("Wine couldn't create its Windows environment. Is Rosetta 2 installed?")
+            }
+        } catch {
+            // Whatever Wine left running goes, and so does the half-made environment, which would
+            // otherwise count as ready.
+            _ = try? await Shell.run(wineserver, ["-k"], environment: env, check: false, timeout: .seconds(30))
+            try? FileManager.default.removeItem(at: prefix)
+            throw error
         }
+    }
+
+    /// Wine for macOS is an Intel program, so on Apple silicon it needs Rosetta 2.
+    public static func checkRosetta() async throws {
+        #if arch(arm64)
+        let result = try? await Shell.run(URL(fileURLWithPath: "/usr/bin/arch"), ["-x86_64", "/usr/bin/true"],
+                                          check: false, timeout: .seconds(30))
+        guard result?.status == 0 else {
+            throw DecanterError("""
+                Decanter needs Rosetta 2, which isn't installed. To install it, open Terminal and run \
+                softwareupdate --install-rosetta, then click Try Again.
+                """)
+        }
+        #endif
     }
 
     private static func installDXMT(
         wineDir: URL, baseRoot: URL, wineTag: String, progress: @escaping ProgressHandler
     ) async throws -> (tag: String, root: URL) {
         let fm = FileManager.default
-        let (tag, asset) = try await latestAsset(repo: dxmtRepo) { $0.contains("builtin") && $0.hasSuffix(".tar.gz") }
+        let (tag, asset) = try await build(EngineBuilds.dxmt) {
+            try await latestAsset(repo: dxmtRepo) { $0.contains("builtin") && $0.hasSuffix(".tar.gz") }
+        }
         let overlayDir = Paths.runtimes.appendingPathComponent("wine-\(wineTag)+dxmt-\(tag)", isDirectory: true)
         let marker = overlayDir.appendingPathComponent(overlayMarker)
         let relativeRoot = String(baseRoot.path.dropFirst(wineDir.path.count))
@@ -524,31 +628,56 @@ public enum RuntimeManager {
         fm.createFile(atPath: overlayDir.appendingPathComponent(overlayMarker).path, contents: nil)
     }
 
+    /// The pinned build, or with `EngineBuilds.useNewest` set, whatever `newest` finds upstream.
+    static func build(
+        _ pinned: PinnedBuild, newest: () async throws -> (tag: String, asset: GitHubRelease.Asset)
+    ) async throws -> (tag: String, asset: GitHubRelease.Asset) {
+        EngineBuilds.useNewest ? try await newest() : (pinned.version, pinned.asset)
+    }
+
     private static func latestAsset(
         repo: String, matching: (String) -> Bool
     ) async throws -> (tag: String, asset: GitHubRelease.Asset) {
-        for release in try await GitHub.releases(repo) where !release.prerelease {
-            if let asset = release.assets.first(where: { matching($0.name) }) {
+        guard let found = latestAsset(in: try await GitHub.releases(repo), matching: matching) else {
+            throw DecanterError("No download with a checksum to verify it by was found in \(repo).")
+        }
+        return found
+    }
+
+    /// The newest full release's matching asset. Releases whose asset has no checksum (uploaded
+    /// before GitHub kept them) are passed over for an older one that has.
+    static func latestAsset(
+        in releases: [GitHubRelease], matching: (String) -> Bool
+    ) -> (tag: String, asset: GitHubRelease.Asset)? {
+        for release in releases where !release.prerelease {
+            if let asset = release.assets.first(where: { matching($0.name) && $0.sha256 != nil }) {
                 return (release.tag_name, asset)
             }
         }
-        throw DecanterError("No suitable download found in \(repo).")
+        return nil
     }
 
     private static func fetch(
         _ asset: GitHubRelease.Asset, to archive: URL, label: String, progress: @escaping ProgressHandler
     ) async throws {
+        // Nothing is installed unchecked: the asset was picked for having a checksum.
+        guard let expected = asset.sha256 else {
+            throw DecanterError("\(asset.name) has no checksum to verify it by, so it wasn't installed.")
+        }
+        // A download kept from a setup that was cancelled or failed later on is used again if it checks out.
+        if FileManager.default.fileExists(atPath: archive.path) {
+            progress(.init(stage: "Verifying earlier download…", fraction: nil))
+            if (try? Checksum.sha256(of: archive)) == expected { return }
+            try? FileManager.default.removeItem(at: archive)
+        }
         progress(.init(stage: label, fraction: 0))
         try await Downloader.download(from: asset.browser_download_url, to: archive) {
             progress(.init(stage: label, fraction: $0))
         }
-        if let digest = asset.digest, digest.hasPrefix("sha256:") {
-            progress(.init(stage: "Verifying download…", fraction: nil))
-            let actual = try Checksum.sha256(of: archive)
-            guard actual == digest.dropFirst("sha256:".count) else {
-                try? FileManager.default.removeItem(at: archive)
-                throw DecanterError("\(asset.name) failed its checksum — the download was corrupted or tampered with.")
-            }
+        progress(.init(stage: "Verifying download…", fraction: nil))
+        guard try Checksum.sha256(of: archive) == expected else {
+            try? FileManager.default.removeItem(at: archive)
+            throw DecanterError("\(asset.name) failed its checksum — the download was corrupted or tampered with.")
         }
     }
 

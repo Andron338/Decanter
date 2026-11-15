@@ -101,16 +101,22 @@ final class AppModel {
     var choosingSteamGames = false
     @ObservationIgnored private var scanningSteam = false
 
+    /// Settings key: new installs take the newest upstream engine builds instead of the pinned ones.
+    static let newestEnginesKey = "useNewestEngines"
+
     static var downloadsCoversAutomatically: Bool {
         UserDefaults.standard.object(forKey: "autoCovers") as? Bool ?? true
     }
 
     init() {
+        if UserDefaults.standard.bool(forKey: Self.newestEnginesKey) { EngineBuilds.useNewest = true }
         // Before the library: this is what moves older libraries' bottles into the bottle list.
         let list = BottleStore.loadAdopting()
         bottles = list.bottles
         defaultBottleID = list.defaultID
         games = AppModel.loadLibrary()
+        let problems = LibraryStore.takeLoadProblems()
+        if !problems.isEmpty { errorMessage = problems.joined(separator: "\n\n") }
         for game in games { loadArtwork(for: game) }
         fetchMissingCovers()
         findSteamGames()
@@ -145,10 +151,13 @@ final class AppModel {
 
     // MARK: Setup
 
+    @ObservationIgnored private var setupTask: Task<Void, Never>?
+
     func runSetup() {
         if case .working = setupState { return }
         setupState = .working(stage: "Starting…", fraction: nil)
-        Task {
+        setupTask = Task {
+            defer { setupTask = nil }
             do {
                 let installed = try await RuntimeManager.setup { progress in
                     Task { @MainActor in
@@ -159,10 +168,18 @@ final class AppModel {
                 }
                 runtime = installed
                 setupState = .needed
+            } catch where Task.isCancelled {
+                setupState = .needed
             } catch {
                 setupState = .failed(error.localizedDescription)
             }
         }
+    }
+
+    /// Stops setup where it is: the download, the unpacking or Wine. What finished is kept and
+    /// skipped next time; nothing half-done is.
+    func cancelSetup() {
+        setupTask?.cancel()
     }
 
     // MARK: Adding games
@@ -701,14 +718,19 @@ final class AppModel {
                     self.fillingScreen.remove(id)
                     if self.fillingScreen.isEmpty { DisplayFit.restore() }
                 }
+                // A game Steam starts is followed by its own processes: steam.exe either hands it to
+                // a running Steam and quits at once, or is Steam and outlives the game.
+                let watch = GameProcesses.watch(for: launched, prefix: prefix)
                 do {
                     _ = try Launcher.start(Launcher.plan(game: launched, prefix: prefix, runtime: runtime), log: logURL(for: game)) { status in
                         Task { @MainActor in
+                            // Steam just quit, perhaps after downloading something.
+                            self.findSteamGames()
+                            // The game's own processes end its session (below).
+                            guard watch == nil else { return }
                             restoreScreen()
                             self.running.remove(id)
                             self.addPlayTime(Date().timeIntervalSince(started), to: id)
-                            // Steam just quit, perhaps after downloading something.
-                            self.findSteamGames()
                             if status != 0 && Date().timeIntervalSince(started) < 10 {
                                 self.errorMessage = "\(game.name) quit right after starting. "
                                     + "Open its settings to try a different renderer or a fixed-size window, or check the log."
@@ -718,6 +740,16 @@ final class AppModel {
                 } catch {
                     restoreScreen()
                     throw error
+                }
+                if let watch {
+                    let launchedAt = Date()
+                    let played = await GameProcesses.waitForSession(of: watch, stillStarting: {
+                        // Give Wine a moment to start its server before taking its absence as "stopped".
+                        Date().timeIntervalSince(launchedAt) < 15 || Launcher.wineIsRunning(in: prefix)
+                    })
+                    restoreScreen()
+                    running.remove(id)
+                    if let played { addPlayTime(played, to: id) }
                 }
             } catch {
                 running.remove(id)
