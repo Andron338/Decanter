@@ -721,24 +721,25 @@ final class AppModel {
     }
 
     /// A game started through Steam runs with the environment Steam was started with, so its DirectX
-    /// routing is Steam's. When the game wants another one and Steam is already running, Steam is
-    /// asked to quit first and then starts again, with the game, on the game's routing.
+    /// routing and D3DMetal options are Steam's. When the game wants others and Steam is already
+    /// running, Steam is asked to quit first and then starts again, with the game, on the game's.
+    /// A Steam Decanter lost track of (it was quit and opened again) counts as running too.
     private func matchSteamRouting(for game: Game, prefix: URL, runtime: InstalledRuntime) async {
         guard runtime.engine(for: game.settings.renderer) == .sikarugir, Self.startsSteam(game) else { return }
-        let wanted = Launcher.wine10Graphics(for: game)
-        let steamRunning = games.contains {
+        let wanted = Launcher.steamGraphics(for: game)
+        let steamRunning = Launcher.wineIsRunning(in: prefix) || games.contains {
             $0.id != game.id && running.contains($0.id) && $0.bottleID == game.bottleID && Self.startsSteam($0)
                 && runtime.engine(for: $0.settings.renderer) == .sikarugir
         }
-        if steamRunning, let current = Launcher.runningRouting(in: prefix), current != wanted {
+        if steamRunning, let current = Launcher.runningGraphics(in: prefix), current != wanted {
             let previous = busyMessage
-            busyMessage = "Restarting Steam for \(game.name)'s DirectX setting…"
+            busyMessage = "Restarting Steam for \(game.name)'s graphics settings…"
             defer { busyMessage = previous }
             await Launcher.shutDownSteam(URL(fileURLWithPath: game.executablePath), prefix: prefix, runtime: runtime)
         } else if steamRunning {
             return
         }
-        Launcher.recordRouting(wanted, in: prefix)
+        Launcher.recordGraphics(wanted, in: prefix)
     }
 
     /// Puts Microsoft's Visual C++ runtime into the game's prefix the first time a game there needs

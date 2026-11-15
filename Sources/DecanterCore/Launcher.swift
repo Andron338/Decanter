@@ -119,18 +119,37 @@ public enum Launcher {
     }
 
     /// Every program in a Wine prefix inherits the environment of the one that started the prefix's
-    /// processes, so a game started through an already-running Steam gets Steam's routing, not its own.
-    /// This file remembers which routing a prefix's processes were started with.
+    /// processes, so a game started through an already-running Steam gets Steam's graphics, not its own.
+    /// This file remembers which a prefix's processes were started with (see `steamGraphics(for:)`).
     static func routingMarker(for prefix: URL) -> URL {
         prefix.deletingLastPathComponent().appendingPathComponent("wine10-graphics")
     }
 
-    public static func runningRouting(in prefix: URL) -> Wine10Graphics? {
-        (try? String(contentsOf: routingMarker(for: prefix), encoding: .utf8)).flatMap(Wine10Graphics.init(rawValue:))
+    /// What a game Steam starts takes from Steam's launch and may want different: its DirectX route,
+    /// and on the D3DMetal route, D3DMetal's options. `d3dmetal metalfx dxr avx`, say.
+    public static func steamGraphics(for game: Game) -> String {
+        let route = wine10Graphics(for: game)
+        guard route == .d3dmetal else { return route.rawValue }
+        let settings = game.settings
+        let options = [(settings.metalFX, "metalfx"), (settings.rayTracing, "dxr"), (settings.advertiseAVX, "avx")]
+        return ([route.rawValue] + options.filter(\.0).map(\.1)).joined(separator: " ")
     }
 
-    public static func recordRouting(_ graphics: Wine10Graphics, in prefix: URL) {
-        try? graphics.rawValue.write(to: routingMarker(for: prefix), atomically: true, encoding: .utf8)
+    public static func runningGraphics(in prefix: URL) -> String? {
+        try? String(contentsOf: routingMarker(for: prefix), encoding: .utf8)
+    }
+
+    public static func recordGraphics(_ graphics: String, in prefix: URL) {
+        try? graphics.write(to: routingMarker(for: prefix), atomically: true, encoding: .utf8)
+    }
+
+    /// Whether Wine is running in `prefix`, Decanter's own launches or not: its server's socket sits
+    /// in a folder named after the prefix's device and inode, and goes when the server ends.
+    public static func wineIsRunning(in prefix: URL) -> Bool {
+        var info = stat()
+        guard stat(prefix.path, &info) == 0 else { return false }
+        let folder = "/tmp/.wine-\(getuid())/server-\(String(UInt64(info.st_dev), radix: 16))-\(String(UInt64(info.st_ino), radix: 16))"
+        return FileManager.default.fileExists(atPath: folder + "/socket")
     }
 
     /// Asks the Steam client in a prefix to quit, waits up to `timeout` for everything there to end,

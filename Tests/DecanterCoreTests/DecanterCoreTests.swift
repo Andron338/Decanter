@@ -316,9 +316,9 @@ final class DecanterCoreTests: XCTestCase {
 
     func testWine10RoutingRemembersWhatTheBottleRunsWith() throws {
         let prefix = try temporaryFolder().appendingPathComponent("sk")
-        XCTAssertNil(Launcher.runningRouting(in: prefix))
-        Launcher.recordRouting(.vkd3d, in: prefix)
-        XCTAssertEqual(Launcher.runningRouting(in: prefix), .vkd3d)
+        XCTAssertNil(Launcher.runningGraphics(in: prefix))
+        Launcher.recordGraphics("vkd3d", in: prefix)
+        XCTAssertEqual(Launcher.runningGraphics(in: prefix), "vkd3d")
     }
 
     func testMsiGoesThroughMsiexec() {
@@ -954,5 +954,18 @@ final class DecanterCoreTests: XCTestCase {
         plain.settings.renderer = .d3dmetal
         XCTAssertFalse(plain.keepSteamOnWine10())
         XCTAssertEqual(plain.settings.renderer, .d3dmetal)
+    }
+
+    func testSteamRestartsForD3DMetalOptionsOnlyOnThatRoute() {
+        var game = Game(name: "S", executablePath: "/b/Steam/steam.exe", bottleID: UUID())
+        game.steamAppID = 1
+        game.settings.wine10Graphics = .d3dmetal
+        game.settings.metalFX = true
+        game.settings.rayTracing = false
+        game.settings.advertiseAVX = true
+        XCTAssertEqual(Launcher.steamGraphics(for: game), "d3dmetal metalfx avx")
+        game.settings.wine10Graphics = .metal
+        XCTAssertEqual(Launcher.steamGraphics(for: game), "metal")
+        XCTAssertFalse(Launcher.wineIsRunning(in: URL(fileURLWithPath: "/nonexistent/prefix")))
     }
 }

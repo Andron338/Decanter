@@ -246,7 +246,7 @@ struct GameSettingsSheet: View {
                     Toggle("DLSS through MetalFX", isOn: $game.settings.metalFX)
                     Toggle("Report AVX support to the game", isOn: $game.settings.advertiseAVX)
                     if game.steamAppID != nil {
-                        Text("Steam passes these to its games when it starts, so quit Steam after changing them.")
+                        Text("Steam passes these to its games when it starts, so it restarts when they change.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
