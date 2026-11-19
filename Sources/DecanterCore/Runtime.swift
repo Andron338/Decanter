@@ -377,7 +377,10 @@ public enum RuntimeManager {
 
     public static func setup(progress: @escaping ProgressHandler) async throws -> InstalledRuntime {
         try [Paths.runtimes, Paths.components, Paths.downloads, Paths.bottles, Paths.logs].forEach(Paths.ensure)
-        try await checkRosetta()
+        if await !isRosettaInstalled() {
+            progress(.init(stage: "Installing Rosetta 2…", fraction: nil))
+            try await installRosetta()
+        }
 
         // 1. Wine
         progress(.init(stage: "Finding the Wine build…", fraction: nil))
@@ -559,18 +562,45 @@ public enum RuntimeManager {
         }
     }
 
-    /// Wine for macOS is an Intel program, so on Apple silicon it needs Rosetta 2.
-    public static func checkRosetta() async throws {
+    /// Wine for macOS is an Intel program, so on Apple silicon it needs Rosetta 2. True on an
+    /// Intel Mac, and on Apple silicon once Rosetta 2 can run an Intel program.
+    public static func isRosettaInstalled() async -> Bool {
         #if arch(arm64)
         let result = try? await Shell.run(URL(fileURLWithPath: "/usr/bin/arch"), ["-x86_64", "/usr/bin/true"],
                                           check: false, timeout: .seconds(30))
-        guard result?.status == 0 else {
-            throw DecanterError("""
-                Decanter needs Rosetta 2, which isn't installed. To install it, open Terminal and run \
-                softwareupdate --install-rosetta, then click Try Again.
-                """)
-        }
+        return result?.status == 0
+        #else
+        return true
         #endif
+    }
+
+    /// Installs Rosetta 2 through Software Update, agreeing to Apple's license for it: callers tell
+    /// the user so first. Software Update installs it without a password for most administrators;
+    /// when it won't, macOS asks for an administrator's password and it runs again with that.
+    public static func installRosetta() async throws {
+        guard await !isRosettaInstalled() else { return }
+        let command = ["/usr/sbin/softwareupdate", "--install-rosetta", "--agree-to-license"]
+
+        let direct = try await Shell.run(URL(fileURLWithPath: command[0]), Array(command.dropFirst()),
+                                         check: false, timeout: .seconds(900))
+        if await isRosettaInstalled() { return }
+
+        let script = "do shell script \"\(command.joined(separator: " "))\" with administrator privileges"
+        let elevated = try await Shell.run(URL(fileURLWithPath: "/usr/bin/osascript"), ["-e", script],
+                                           check: false, timeout: .seconds(900))
+        if await isRosettaInstalled() { return }
+
+        // osascript reports a cancelled password prompt as error -128.
+        if elevated.output.contains("-128") {
+            throw DecanterError("Rosetta 2 wasn't installed because the password prompt was cancelled. Decanter needs it to run Wine.")
+        }
+        let tail = (elevated.output.isEmpty ? direct.output : elevated.output)
+            .split(separator: "\n").suffix(4).joined(separator: "\n")
+        throw DecanterError("""
+            Rosetta 2 couldn't be installed. Check your internet connection and click Try Again, or open \
+            Terminal and run softwareupdate --install-rosetta.
+            \(tail)
+            """)
     }
 
     private static func installDXMT(

@@ -138,7 +138,7 @@ Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete 
 | Direct3D 9 / 10 / 11 / 12 | Wine 10 engine: wined3d, DXMT, D3DMetal or vkd3d → Metal | The Steam engine. DXMT by default; D3DMetal for games that require Direct3D 12 (S.T.A.L.K.E.R. 2 starts this way), with vkd3d as the fallback until D3DMetal is installed. |
 | Anti-cheat (EAC, BattlEye, Vanguard) | — | Does not work under Wine on macOS, in any app. |
 
-Wine for macOS is an x86-64 build and runs through Rosetta 2, so Rosetta must be installed.
+Wine for macOS is an x86-64 build and runs through Rosetta 2. If Rosetta isn't installed, setup installs it first through Software Update (the setup screen says so, since that agrees to Apple's Rosetta 2 license), asking for an administrator password only if Software Update needs one.
 
 ## Build
 

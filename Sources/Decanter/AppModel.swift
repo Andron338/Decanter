@@ -73,6 +73,8 @@ final class AppModel {
     /// Prefixes being cloned right now, so two launches don't each make one for the same bottle.
     @ObservationIgnored private var prefixTasks: [String: Task<UUID, Error>] = [:]
     var setupState: SetupState = .needed
+    /// Setup will install Rosetta 2 first, which the setup screen says before the user starts it.
+    var rosettaMissing = false
     var busyMessage: String?
     var errorMessage: String?
     var running: Set<UUID> = []
@@ -173,7 +175,12 @@ final class AppModel {
             } catch {
                 setupState = .failed(error.localizedDescription)
             }
+            await checkRosetta()
         }
+    }
+
+    func checkRosetta() async {
+        rosettaMissing = await !RuntimeManager.isRosettaInstalled()
     }
 
     /// Stops setup where it is: the download, the unpacking or Wine. What finished is kept and

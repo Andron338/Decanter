@@ -100,6 +100,13 @@ struct SetupView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 460)
+            if model.rosettaMissing {
+                Text("Wine is an Intel program, so Decanter will also install Apple's Rosetta 2. Setting up agrees to Apple's Rosetta 2 license, and macOS may ask for your password.")
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 460)
+            }
 
             switch model.setupState {
             case .needed:
@@ -126,6 +133,7 @@ struct SetupView: View {
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task { await model.checkRosetta() }
     }
 
     private func setupButton(_ title: String) -> some View {
