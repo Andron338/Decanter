@@ -1305,4 +1305,75 @@ final class DecanterCoreTests: XCTestCase {
         XCTAssertEqual(owner?.engine, .crossover)
         XCTAssertNil(list.owner(of: URL(fileURLWithPath: "/Users/me/Downloads/Game/autorun.exe")))
     }
+
+    // MARK: Rosetta-free runtime and the runtimes list
+
+    func testNativeRuntimeRunsEveryRendererOnItsOwnWine() {
+        var native = runtime
+        native.nativeTag = "8.0"
+        native.crossoverPath = "/rt/cx"
+        native.sikarugirPath = "/rt/sk"
+        for renderer in Renderer.allCases {
+            XCTAssertEqual(native.effectiveRenderer(renderer), .wine)
+            XCTAssertEqual(native.engine(for: renderer), .wine)
+            XCTAssertEqual(native.wine(for: renderer).path, "/rt/base/bin/wine")
+        }
+    }
+
+    func testRuntimesListMatchesTheKindOfMainWine() {
+        var native = runtime
+        native.nativeTag = "8.0"
+        XCTAssertEqual(RuntimeComponent.allCases.filter { $0.applies(to: native) }, [.metalSharp])
+        XCTAssertFalse(RuntimeComponent.allCases.filter { $0.applies(to: runtime) }.contains(.metalSharp))
+        XCTAssertEqual(RuntimeComponent.metalSharp.installedVersion(in: native), "8.0")
+        XCTAssertNil(RuntimeComponent.wine.installedVersion(in: native))
+        XCTAssertNil(RuntimeComponent.crossover.installedVersion(in: runtime))
+    }
+
+    func testUpdateAvailableOnlyForAnInstalledBuildOtherThanThePin() {
+        var current = runtime
+        current.wineTag = RuntimeComponent.wine.currentVersion
+        XCTAssertFalse(RuntimeComponent.wine.updateAvailable(in: current))
+        current.wineTag = "10.0"
+        XCTAssertTrue(RuntimeComponent.wine.updateAvailable(in: current))
+        XCTAssertFalse(RuntimeComponent.crossover.updateAvailable(in: current))
+        current.crossoverPath = "/rt/cx"
+        current.crossoverTag = RuntimeComponent.crossover.currentVersion
+        XCTAssertFalse(RuntimeComponent.crossover.updateAvailable(in: current))
+    }
+
+    func testFindsWineInsideAnAppBundle() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: dir) }
+        let contents = dir.appendingPathComponent("MetalSharp-Wine.app/Contents")
+        let macOS = contents.appendingPathComponent("MacOS")
+        try fm.createDirectory(at: macOS, withIntermediateDirectories: true)
+        let server = macOS.appendingPathComponent("wineserver")
+        try Data("#!/bin/sh\n".utf8).write(to: server)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: server.path)
+        try fm.createSymbolicLink(atPath: contents.appendingPathComponent("bin").path, withDestinationPath: "MacOS")
+        XCTAssertEqual(RuntimeManager.findWineRoot(in: dir)?.standardizedFileURL.path, contents.standardizedFileURL.path)
+    }
+
+    func testRemovingAnEngineDeletesOnlyItsOwnFolders() throws {
+        let fm = FileManager.default
+        let home = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let saved = Paths.root
+        Paths.root = home
+        defer { Paths.root = saved; try? fm.removeItem(at: home) }
+        let base = Paths.runtimes.appendingPathComponent("wine-11.21/Wine Staging.app/Contents/Resources/wine")
+        let cx = Paths.runtimes.appendingPathComponent("cx-WS12WineCX24.0.7/wswine.bundle")
+        for folder in [base, cx] { try fm.createDirectory(at: folder, withIntermediateDirectories: true) }
+        var before = InstalledRuntime(wineTag: "11.21", basePath: base.path)
+        before.crossoverPath = cx.path
+        before.crossoverTag = "WS12WineCX24.0.7"
+        var after = before
+        after.crossoverPath = nil
+        after.crossoverTag = nil
+
+        RuntimeManager.removeUnused(previous: before, current: after)
+        XCTAssertFalse(fm.fileExists(atPath: Paths.runtimes.appendingPathComponent("cx-WS12WineCX24.0.7").path))
+        XCTAssertTrue(fm.fileExists(atPath: base.path))
+    }
 }

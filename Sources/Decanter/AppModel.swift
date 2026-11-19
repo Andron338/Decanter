@@ -75,6 +75,15 @@ final class AppModel {
     var setupState: SetupState = .needed
     /// Setup will install Rosetta 2 first, which the setup screen says before the user starts it.
     var rosettaMissing = false
+    /// Work under way or failed in Settings › Runtimes, by component.
+    var componentWork: [RuntimeComponent: SetupState] = [:]
+
+    /// The setup screen shows until there is a Wine that can run here: an Intel one set up earlier
+    /// stops working when Rosetta 2 goes (removed, or a macOS without it).
+    var needsSetup: Bool {
+        guard let runtime else { return true }
+        return rosettaMissing && !runtime.isNative
+    }
     var busyMessage: String?
     var errorMessage: String?
     var running: Set<UUID> = []
@@ -122,6 +131,7 @@ final class AppModel {
         for game in games { loadArtwork(for: game) }
         fetchMissingCovers()
         findSteamGames()
+        Task { await checkRosetta() }
     }
 
     /// Games added before detection existed get inspected once; their renderer choice is left alone
@@ -155,13 +165,14 @@ final class AppModel {
 
     @ObservationIgnored private var setupTask: Task<Void, Never>?
 
-    func runSetup() {
+    /// `native`: set up MetalSharp Wine, which needs no Rosetta 2, instead of installing Rosetta.
+    func runSetup(native: Bool = false) {
         if case .working = setupState { return }
         setupState = .working(stage: "Starting…", fraction: nil)
         setupTask = Task {
             defer { setupTask = nil }
             do {
-                let installed = try await RuntimeManager.setup { progress in
+                let installed = try await RuntimeManager.setup(native: native) { progress in
                     Task { @MainActor in
                         if case .working = self.setupState {
                             self.setupState = .working(stage: progress.stage, fraction: progress.fraction)
@@ -181,6 +192,58 @@ final class AppModel {
 
     func checkRosetta() async {
         rosettaMissing = await !RuntimeManager.isRosettaInstalled()
+    }
+
+    // MARK: Runtimes
+
+    func install(_ component: RuntimeComponent) {
+        runComponentWork(component) { runtime, progress in
+            try await RuntimeManager.install(component, into: runtime, progress: progress)
+        }
+    }
+
+    func update(_ component: RuntimeComponent) {
+        runComponentWork(component) { runtime, progress in
+            try await RuntimeManager.update(component, in: runtime, progress: progress)
+        }
+    }
+
+    func remove(_ component: RuntimeComponent) {
+        guard let runtime, running.isEmpty else { return }
+        do {
+            self.runtime = try RuntimeManager.remove(component, from: runtime)
+            componentWork[component] = nil
+        } catch {
+            componentWork[component] = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Engines are only changed while no game runs: a running game holds files inside them.
+    var canChangeRuntimes: Bool {
+        running.isEmpty && componentWork.values.allSatisfy { if case .working = $0 { false } else { true } }
+            && d3dMetalInstall.map { if case .working = $0 { false } else { true } } ?? true
+    }
+
+    private func runComponentWork(
+        _ component: RuntimeComponent,
+        _ work: @escaping (InstalledRuntime, @escaping ProgressHandler) async throws -> InstalledRuntime
+    ) {
+        guard let runtime, canChangeRuntimes else { return }
+        componentWork[component] = .working(stage: "Starting…", fraction: nil)
+        Task {
+            do {
+                self.runtime = try await work(runtime) { progress in
+                    Task { @MainActor in
+                        if case .working = self.componentWork[component] {
+                            self.componentWork[component] = .working(stage: progress.stage, fraction: progress.fraction)
+                        }
+                    }
+                }
+                componentWork[component] = nil
+            } catch {
+                componentWork[component] = .failed(error.localizedDescription)
+            }
+        }
     }
 
     /// Stops setup where it is: the download, the unpacking or Wine. What finished is kept and
@@ -646,6 +709,8 @@ final class AppModel {
     /// first time something needs it.
     private func readyRuntime(for renderer: Renderer) async throws -> InstalledRuntime {
         guard var runtime else { throw DecanterError("Decanter isn't set up yet.") }
+        // The Rosetta-free Wine runs every game itself; the other engines are Intel programs.
+        if runtime.isNative { return runtime }
         if renderer == .crossover && !runtime.hasCrossOver {
             let previous = busyMessage
             busyMessage = "Getting the engine for older games (about 165 MB, one time)…"

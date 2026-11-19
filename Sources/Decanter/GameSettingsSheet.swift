@@ -253,6 +253,11 @@ struct GameSettingsSheet: View {
                     Text("Wine 10 — DirectX 9 to 12 (Steam)").tag(Renderer.sikarugir)
                     Text("Wine 11 built-in").tag(Renderer.wine)
                 }
+                .disabled(model.runtime?.isNative == true)
+                if model.runtime?.isNative == true {
+                    Text("Decanter is set up without Rosetta 2, so every game runs on MetalSharp Wine, which picks the Direct3D route itself. The renderer chosen here applies again if you set up with Rosetta 2.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if game.settings.renderer == .sikarugir {
                     Picker(selection: $game.settings.wine10Graphics) {
                         Text("Automatic").tag(Wine10Graphics.automatic)

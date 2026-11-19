@@ -3,6 +3,7 @@ import SwiftUI
 
 @main
 struct DecanterApp: App {
+    @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
     @State private var model = AppModel()
 
     init() {
@@ -11,7 +12,10 @@ struct DecanterApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Decanter") {
+        // One window, not a WindowGroup: a WindowGroup opens another window for every program
+        // opened with Decanter or dropped on its Dock icon. A Window gets the file in the window
+        // already open, and the Dock icon brings it back after it is closed.
+        Window("Decanter", id: "main") {
             RootView()
                 .environment(model)
                 .frame(minWidth: 720, minHeight: 480)
@@ -29,9 +33,22 @@ struct DecanterApp: App {
         }
 
         Settings {
-            PreferencesView().environment(model)
+            TabView {
+                PreferencesView()
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                RuntimesView()
+                    .frame(width: 560, height: 520)
+                    .tabItem { Label("Runtimes", systemImage: "shippingbox") }
+            }
+            .environment(model)
         }
     }
+}
+
+/// A single `Window` scene quits the app when it is closed; Decanter keeps running instead, so a game
+/// that is still playing keeps being tracked, and the Dock icon brings the window back.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
 struct PreferencesView: View {
@@ -70,7 +87,7 @@ struct RootView: View {
     var body: some View {
         @Bindable var model = model
         Group {
-            if model.runtime == nil {
+            if model.needsSetup {
                 SetupView()
             } else {
                 LibraryView()
@@ -101,7 +118,7 @@ struct SetupView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 460)
             if model.rosettaMissing {
-                Text("Wine is an Intel program, so Decanter will also install Apple's Rosetta 2. Setting up agrees to Apple's Rosetta 2 license, and macOS may ask for your password.")
+                Text(rosettaNote)
                     .font(.callout)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
@@ -110,7 +127,11 @@ struct SetupView: View {
 
             switch model.setupState {
             case .needed:
-                setupButton("Set Up")
+                if model.rosettaMissing {
+                    setupChoices
+                } else {
+                    setupButton("Set Up")
+                }
             case .working(let stage, let fraction):
                 VStack(spacing: 8) {
                     if let fraction {
@@ -128,7 +149,11 @@ struct SetupView: View {
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 460)
-                setupButton("Try Again")
+                if model.rosettaMissing {
+                    setupChoices
+                } else {
+                    setupButton("Try Again")
+                }
             }
         }
         .padding(40)
@@ -136,11 +161,34 @@ struct SetupView: View {
         .task { await model.checkRosetta() }
     }
 
+    private var rosettaNote: String {
+        let start = model.runtime == nil
+            ? "Wine is an Intel program, and this Mac doesn't have Rosetta 2 to run it."
+            : "Rosetta 2 isn't available any more, so the Wine Decanter set up earlier can't run."
+        return start + " Decanter can install Rosetta 2, which agrees to Apple's Rosetta 2 license (macOS may ask for your password)."
+    }
+
     private func setupButton(_ title: String) -> some View {
         Button(title) { model.runSetup() }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .keyboardShortcut(.defaultAction)
+    }
+
+    /// Without Rosetta 2: install it (recommended), or use the experimental Wine that doesn't need it.
+    @ViewBuilder private var setupChoices: some View {
+        setupButton("Install Rosetta 2 and Set Up")
+        if RuntimeManager.canRunWithoutRosetta {
+            VStack(spacing: 6) {
+                Button("Set Up Without Rosetta") { model.runSetup(native: true) }
+                    .controlSize(.large)
+                Text("Experimental. Uses MetalSharp Wine, an early-access arm64 build that runs Intel games through FEX. About 1.3 GB, and only its own engine: CrossOver, the Steam engine and D3DMetal need Rosetta.")
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 420)
+            }
+        }
     }
 }
 

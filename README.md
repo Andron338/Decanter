@@ -140,6 +140,10 @@ Everything Decanter owns is in `~/Library/Application Support/Decanter`. Delete 
 
 Wine for macOS is an x86-64 build and runs through Rosetta 2. If Rosetta isn't installed, setup installs it first through Software Update (the setup screen says so, since that agrees to Apple's Rosetta 2 license), asking for an administrator password only if Software Update needs one.
 
+On Apple silicon with macOS 15 or later, setup without Rosetta also offers an experimental alternative: [MetalSharp Wine](https://github.com/metalsharp/MetalSharp-Wine), an early-access arm64 Wine 11.20 that runs Intel programs through FEX (about 1.3 GB). With it every game runs on that one Wine, which picks the Direct3D route itself; CrossOver, the Steam engine and D3DMetal are Intel programs and aren't used. If Rosetta 2 goes away after an Intel setup (macOS 28 drops most of it), Decanter returns to the setup screen with both choices.
+
+**Settings › Runtimes** lists every engine with its installed version: optional engines can be installed, updated to the tested build and removed there, and the main Wine can be switched between the Rosetta and Rosetta-free kinds.
+
 ## Build
 
 ```bash

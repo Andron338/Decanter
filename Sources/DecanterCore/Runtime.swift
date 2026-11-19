@@ -91,6 +91,10 @@ public struct InstalledRuntime: Codable, Equatable {
     /// Wine root of the Sikarugir Wine 10 engine, if installed. Left as downloaded: the graphics
     /// backends reach it through environment variables (see `wine10Environment`).
     public var sikarugirPath: String?
+    /// Set when the main Wine is MetalSharp Wine's native arm64 build, which runs Intel code through
+    /// FEX instead of Rosetta 2. Every other engine is an Intel program, so none of them is used
+    /// with it: MetalSharp picks each game's Direct3D route itself.
+    public var nativeTag: String?
 
     public init(wineTag: String, dxmtTag: String? = nil, basePath: String, metalPath: String? = nil,
                 gptkTag: String? = nil, gptkPath: String? = nil) {
@@ -102,6 +106,8 @@ public struct InstalledRuntime: Codable, Equatable {
         self.gptkPath = gptkPath
     }
 
+    /// The main Wine runs without Rosetta 2 (see `nativeTag`).
+    public var isNative: Bool { nativeTag != nil }
     public var hasD3DMetal: Bool { gptkPath != nil }
     public var hasCrossOver: Bool { crossoverPath != nil }
     public var hasSikarugir: Bool { sikarugirPath != nil }
@@ -188,6 +194,7 @@ public struct InstalledRuntime: Codable, Equatable {
 
     /// The renderer that will actually be used, falling back when the requested one isn't installed.
     public func effectiveRenderer(_ requested: Renderer) -> Renderer {
+        if isNative { return .wine }
         switch requested {
         case .d3dmetal: return gptkPath != nil ? .d3dmetal : effectiveRenderer(.metal)
         case .metal: return metalPath != nil ? .metal : .wine
@@ -250,6 +257,7 @@ public struct InstalledRuntime: Codable, Equatable {
     }
 
     public var summary: String {
+        if let nativeTag { return "MetalSharp Wine \(nativeTag) · no Rosetta" }
         var parts = ["Wine \(wineTag)"]
         if let dxmtTag { parts.append("DXMT \(dxmtTag)") }
         if gptkPath != nil { parts.append("D3DMetal") }
@@ -306,7 +314,95 @@ public enum EngineBuilds {
         repo: "Sikarugir-App/Engines", release: "v1.0", file: "WS12WineSikarugir10.0_8.tar.xz",
         sha256: "2a6bcf2a3bf13cddf825599b6bc1e3659cbf71e1282c6d77141a92f6ac8d4c68", version: "WS12WineSikarugir10.0_8")
 
-    static let all = [wine, dxmt, gamePortingToolkit, crossOver, wine10]
+    /// Wine 11.20 built for arm64, running Intel programs through FEX: the engine for Macs without
+    /// Rosetta 2. Early access and much larger than the others. The notarized app is used, not the
+    /// bare archive beside it, because only the app carries Apple's cross-architecture entitlement.
+    static let metalSharp = PinnedBuild(
+        repo: "metalsharp/MetalSharp-Wine", release: "v8.0", file: "MetalSharp-Wine-8.0-arm64.zip",
+        sha256: "966457f0135e0780b46bf69da3f64d8033e1e5c3dcec27d96313dedb0306c52d", version: "8.0")
+
+    static let all = [wine, dxmt, gamePortingToolkit, crossOver, wine10, metalSharp]
+}
+
+/// One downloadable piece of the runtime, as listed in Settings › Runtimes.
+public enum RuntimeComponent: String, CaseIterable, Identifiable, Sendable {
+    case wine, dxmt, d3dmetal, crossover, sikarugir, metalSharp
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .wine: return "Wine 11"
+        case .dxmt: return "DXMT"
+        case .d3dmetal: return "D3DMetal"
+        case .crossover: return "CrossOver engine"
+        case .sikarugir: return "Wine 10 (Steam engine)"
+        case .metalSharp: return "MetalSharp Wine"
+        }
+    }
+
+    public var purpose: String {
+        switch self {
+        case .wine: return "The main Wine. Runs through Rosetta 2."
+        case .dxmt: return "DirectX 10/11 on Metal, for the main Wine and the Steam engine."
+        case .d3dmetal: return "Apple's DirectX 11/12 on Metal. Apple licence."
+        case .crossover: return "CrossOver's Wine 9, for 32-bit and DirectX 9-era games."
+        case .sikarugir: return "Wine 10 with CrossOver's fixes, which the Steam client needs."
+        case .metalSharp: return "Native arm64 Wine that runs Intel games through FEX, without Rosetta 2. Early access."
+        }
+    }
+
+    /// The engine whose Windows environment template this component's games use.
+    var engine: Engine {
+        switch self {
+        case .d3dmetal: return .gptk
+        case .crossover: return .crossover
+        case .sikarugir: return .sikarugir
+        case .wine, .dxmt, .metalSharp: return .wine
+        }
+    }
+
+    /// Part of the main setup: replaced by setting up again, never removed on its own.
+    public var isCore: Bool { self == .wine || self == .dxmt || self == .metalSharp }
+
+    var pinned: PinnedBuild {
+        switch self {
+        case .wine: return EngineBuilds.wine
+        case .dxmt: return EngineBuilds.dxmt
+        case .d3dmetal: return EngineBuilds.gamePortingToolkit
+        case .crossover: return EngineBuilds.crossOver
+        case .sikarugir: return EngineBuilds.wine10
+        case .metalSharp: return EngineBuilds.metalSharp
+        }
+    }
+
+    /// The version a new install gets: the tested pin.
+    public var currentVersion: String { pinned.version }
+
+    public func installedVersion(in runtime: InstalledRuntime) -> String? {
+        switch self {
+        case .wine: return runtime.isNative ? nil : runtime.wineTag
+        case .dxmt: return runtime.isNative ? nil : runtime.dxmtTag
+        case .d3dmetal: return runtime.gptkPath == nil ? nil : runtime.gptkTag
+        case .crossover: return runtime.crossoverPath == nil ? nil : runtime.crossoverTag
+        case .sikarugir: return runtime.sikarugirPath == nil ? nil : runtime.sikarugirTag
+        case .metalSharp: return runtime.nativeTag
+        }
+    }
+
+    /// Installed, but not the build this Decanter was tested with. With the newest upstream builds
+    /// turned on the pins don't apply, so nothing counts as behind.
+    public func updateAvailable(in runtime: InstalledRuntime) -> Bool {
+        guard !EngineBuilds.useNewest, let installed = installedVersion(in: runtime) else { return false }
+        if self == .sikarugir && runtime.sikarugirNeedsUpdate { return true }
+        return installed != currentVersion
+    }
+
+    /// Usable with this runtime: an Intel engine does nothing for the Rosetta-free one, and the
+    /// Rosetta-free one is only listed once it is the main Wine.
+    public func applies(to runtime: InstalledRuntime) -> Bool {
+        runtime.isNative ? self == .metalSharp : self != .metalSharp
+    }
 }
 
 public struct SetupProgress: Sendable {
@@ -375,11 +471,31 @@ public enum RuntimeManager {
         try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: target)
     }
 
-    public static func setup(progress: @escaping ProgressHandler) async throws -> InstalledRuntime {
+    /// MetalSharp Wine needs macOS 15, the oldest system its arm64 build supports.
+    public static var canRunWithoutRosetta: Bool {
+        #if arch(arm64)
+        return ProcessInfo.processInfo.isOperatingSystemAtLeast(OperatingSystemVersion(majorVersion: 15, minorVersion: 0, patchVersion: 0))
+        #else
+        return false
+        #endif
+    }
+
+    /// Sets up the main Wine, or replaces it with a newer build or the other kind. `native` sets up
+    /// MetalSharp Wine (no Rosetta) instead of the Intel Wine with DXMT. The engines added later are
+    /// kept either way; the Rosetta-free Wine just doesn't use them.
+    public static func setup(native: Bool = false, progress: @escaping ProgressHandler) async throws -> InstalledRuntime {
         try [Paths.runtimes, Paths.components, Paths.downloads, Paths.bottles, Paths.logs].forEach(Paths.ensure)
+        let previous = load()
+        if native {
+            return try await setupNative(previous: previous, progress: progress)
+        }
         if await !isRosettaInstalled() {
             progress(.init(stage: "Installing Rosetta 2…", fraction: nil))
             try await installRosetta()
+        }
+        // Wine's Windows environment is made by the Wine it belongs to: a new build or kind starts a new one.
+        if let previous, previous.isNative || previous.wineTag != EngineBuilds.wine.version || EngineBuilds.useNewest {
+            try? FileManager.default.removeItem(at: BottleStore.templatePrefix(.wine))
         }
 
         // 1. Wine
@@ -392,6 +508,7 @@ public enum RuntimeManager {
         var runtime = load() ?? InstalledRuntime(wineTag: wineTag, basePath: baseRoot.path)
         runtime.wineTag = wineTag
         runtime.basePath = baseRoot.path
+        runtime.nativeTag = nil
         runtime.dxmtTag = nil
         runtime.metalPath = nil
 
@@ -409,8 +526,124 @@ public enum RuntimeManager {
         try await buildTemplate(.wine, runtime: runtime, renderer: .wine, progress: progress)
 
         try save(runtime)
+        removeUnused(previous: previous, current: runtime)
         progress(.init(stage: "Ready", fraction: 1))
         return runtime
+    }
+
+    private static func setupNative(previous: InstalledRuntime?, progress: @escaping ProgressHandler) async throws -> InstalledRuntime {
+        guard canRunWithoutRosetta else {
+            throw DecanterError("Running without Rosetta 2 needs a Mac with Apple silicon and macOS 15 or later.")
+        }
+        if previous?.nativeTag != EngineBuilds.metalSharp.version {
+            try? FileManager.default.removeItem(at: BottleStore.templatePrefix(.wine))
+        }
+        let pinned = EngineBuilds.metalSharp
+        let directory = Paths.runtimes.appendingPathComponent("metalsharp-\(pinned.version)", isDirectory: true)
+        let root = try await installWineArchive(pinned.asset, into: directory, label: "MetalSharp Wine \(pinned.version)",
+                                                progress: progress)
+        var runtime = previous ?? InstalledRuntime(wineTag: "11.20", basePath: root.path)
+        runtime.wineTag = "11.20"
+        runtime.basePath = root.path
+        runtime.nativeTag = pinned.version
+        runtime.dxmtTag = nil
+        runtime.metalPath = nil
+        try await buildTemplate(.wine, runtime: runtime, renderer: .wine, progress: progress)
+        try save(runtime)
+        removeUnused(previous: previous, current: runtime)
+        progress(.init(stage: "Ready", fraction: 1))
+        return runtime
+    }
+
+    // MARK: - Managing installed components
+
+    /// Updates an installed component to the build this Decanter was tested with. The main Wine
+    /// and DXMT come with setup, so updating either runs setup again.
+    public static func update(
+        _ component: RuntimeComponent, in runtime: InstalledRuntime, progress: @escaping ProgressHandler
+    ) async throws -> InstalledRuntime {
+        switch component {
+        case .wine, .dxmt: return try await setup(native: false, progress: progress)
+        case .metalSharp: return try await setup(native: true, progress: progress)
+        case .d3dmetal, .crossover, .sikarugir:
+            let engine = component.engine
+            try? FileManager.default.removeItem(at: BottleStore.templatePrefix(engine))
+            let updated = try await install(component, into: runtime, progress: progress)
+            removeUnused(previous: runtime, current: updated)
+            return updated
+        }
+    }
+
+    /// Installs an optional engine. D3DMetal only after the user accepted Apple's licence.
+    public static func install(
+        _ component: RuntimeComponent, into runtime: InstalledRuntime, progress: @escaping ProgressHandler
+    ) async throws -> InstalledRuntime {
+        switch component {
+        case .d3dmetal: return try await installD3DMetal(into: runtime, progress: progress)
+        case .crossover: return try await installCrossOver(into: runtime, progress: progress)
+        case .sikarugir: return try await installSikarugir(into: runtime, progress: progress)
+        case .wine, .dxmt, .metalSharp:
+            throw DecanterError("\(component.title) is installed by setting Decanter up.")
+        }
+    }
+
+    /// Deletes an optional engine and its Windows environment template. Games' own bottles stay:
+    /// a game set to that engine downloads it again when played, or uses Wine 11 meanwhile.
+    public static func remove(_ component: RuntimeComponent, from runtime: InstalledRuntime) throws -> InstalledRuntime {
+        guard !component.isCore else {
+            throw DecanterError("\(component.title) is part of the main setup and can't be removed on its own.")
+        }
+        var updated = runtime
+        switch component {
+        case .d3dmetal:
+            updated.gptkPath = nil
+            updated.gptkTag = nil
+        case .crossover:
+            updated.crossoverPath = nil
+            updated.crossoverTag = nil
+        case .sikarugir:
+            updated.sikarugirPath = nil
+            updated.sikarugirTag = nil
+        case .wine, .dxmt, .metalSharp:
+            break
+        }
+        try save(updated)
+        try? FileManager.default.removeItem(at: BottleStore.templatePrefix(component.engine))
+        removeUnused(previous: runtime, current: updated)
+        return updated
+    }
+
+    /// Deletes the downloaded folders `previous` used that `current` no longer does. The main
+    /// Wine of the other kind is kept, so switching back to it needs no download.
+    static func removeUnused(previous: InstalledRuntime?, current: InstalledRuntime) {
+        guard let previous else { return }
+        let fm = FileManager.default
+        var stale: [String?] = [previous.gptkPath, previous.crossoverPath, previous.sikarugirPath]
+        if previous.isNative == current.isNative { stale += [previous.basePath, previous.metalPath] }
+        let kept = Set([current.basePath, current.metalPath, current.gptkPath, current.crossoverPath, current.sikarugirPath]
+            .compactMap { $0.flatMap(runtimeFolder) })
+        for folder in Set(stale.compactMap { $0.flatMap(runtimeFolder) }) where !kept.contains(folder) {
+            try? fm.removeItem(atPath: folder)
+        }
+        // DXMT's unpacked files and D3DMetal's links live in Components, by tag.
+        if previous.isNative == current.isNative, let old = previous.dxmtTag, old != current.dxmtTag {
+            try? fm.removeItem(at: Paths.components.appendingPathComponent("dxmt-\(old)", isDirectory: true))
+        }
+        if previous.gptkPath != nil, let old = previous.gptkTag, current.gptkPath == nil || current.gptkTag != old {
+            try? fm.removeItem(at: Paths.components.appendingPathComponent("d3dmetal-\(old)", isDirectory: true))
+        }
+    }
+
+    /// The folder directly inside Runtimes that holds a Wine root, so all of one download goes.
+    static func runtimeFolder(of path: String) -> String? {
+        let runtimes = Paths.runtimes.standardizedFileURL.path
+        var url = URL(fileURLWithPath: path).standardizedFileURL
+        while url.path.count > runtimes.count {
+            let parent = url.deletingLastPathComponent()
+            if parent.path == runtimes { return url.path }
+            url = parent
+        }
+        return nil
     }
 
     /// Optional add-on: Apple's Game Porting Toolkit Wine with D3DMetal, for Direct3D 12 games.
@@ -512,7 +745,12 @@ public enum RuntimeManager {
         try? fm.removeItem(at: partial)
         try Paths.ensure(partial)
         do {
-            try await Shell.run("/usr/bin/tar", ["-xJf", archive.path, "-C", partial.path], timeout: .seconds(600))
+            if archive.pathExtension == "zip" {
+                // ditto keeps an app's code signature and symbolic links intact.
+                try await Shell.run("/usr/bin/ditto", ["-x", "-k", archive.path, partial.path], timeout: .seconds(900))
+            } else {
+                try await Shell.run("/usr/bin/tar", ["-xJf", archive.path, "-C", partial.path], timeout: .seconds(600))
+            }
             try await Shell.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", partial.path], check: false)
             guard findWineRoot(in: partial) != nil else {
                 throw DecanterError("The \(label) archive didn't contain a usable Wine (no bin/wineserver).")
@@ -551,7 +789,9 @@ public enum RuntimeManager {
             try await Shell.run(runtime.wine(for: renderer), ["wineboot", "-u"], environment: env, timeout: .seconds(300))
             try await Shell.run(wineserver, ["-w"], environment: env, check: false, timeout: .seconds(120))
             guard BottleStore.templateReady(engine) else {
-                throw DecanterError("Wine couldn't create its Windows environment. Is Rosetta 2 installed?")
+                throw DecanterError(runtime.isNative
+                    ? "MetalSharp Wine couldn't create its Windows environment."
+                    : "Wine couldn't create its Windows environment. Is Rosetta 2 installed?")
             }
         } catch {
             // Whatever Wine left running goes, and so does the half-made environment, which would
@@ -722,6 +962,13 @@ public enum RuntimeManager {
         for case let url as URL in walker where url.lastPathComponent == "wineserver" {
             let bin = url.deletingLastPathComponent()
             if bin.lastPathComponent == "bin" { return bin.deletingLastPathComponent() }
+            // An app bundle (MetalSharp Wine) keeps its programs in Contents/MacOS, with Contents/bin a
+            // link to that folder, which the walk doesn't follow.
+            let contents = bin.deletingLastPathComponent()
+            if bin.lastPathComponent == "MacOS",
+               FileManager.default.isExecutableFile(atPath: contents.appendingPathComponent("bin/wineserver").path) {
+                return contents
+            }
         }
         return nil
     }
